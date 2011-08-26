@@ -1,0 +1,22 @@
+Name:                ptrace
+Version:             0.1
+License:             AllRightsReserved
+License-file:        LICENSE
+Author:              Matthew Maurer
+Maintainer:          maurer@ugcs.caltech.edu
+-- Copyright:           
+Category:            System
+Build-type:          Simple
+Cabal-version:       >=1.2
+
+
+Library
+  Hs-Source-Dirs:    src
+  Exposed-modules:   System.PTrace
+  Other-Modules:     System.PTrace.Types, System.PTrace.Raw,
+                     System.PTrace.X86_64
+  Build-depends:     base, mtl, unix, filepath, c-storable-deriving,
+                     ghc-prim
+  Extensions:        GeneralizedNewtypeDeriving,
+                     ForeignFunctionInterface,
+                     DeriveGeneric
