@@ -132,4 +132,8 @@ getDataPT target source len = do
   liftIO $ hGetBuf mem target len
 
 setDataPT :: PTracePtr a -> Ptr a -> Int -> PTrace Int
-setDataPT = undefined
+setDataPT target source len = do
+  mem <- fmap pthMem getHandle
+  liftIO $ hSeek mem AbsoluteSeek $ fromIntegral $ unpackPtr target
+  liftIO $ hPutBufNonBlocking mem source len
+  -- TODO investigate whether hPutBufNonBlocking does what I think
