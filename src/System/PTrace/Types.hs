@@ -25,10 +25,7 @@ traceNull = PTP nullPtr
 unpackPtr :: PTracePtr a -> WordPtr
 unpackPtr (PTP ptr) = ptrToWordPtr ptr
 
-data StopReason =
-    Exited Int
-  | Signal Int
-  | Syscalled
+data StopReason = Syscalled
 
 data Request =
      TraceMe
