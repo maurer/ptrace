@@ -1,0 +1,3 @@
+Binds ptrace for haskell in a more sane way than the linux-ptrace package, and intended to be more complete.
+Provides a more useful binding to the ptrace facility present in linux, creating tracing events more along the lines of what are needed by the trace package.
+Bindings are heavily incomplete.
