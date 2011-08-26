@@ -69,8 +69,8 @@ forkPT m = do
   pid <- forkProcess $ traceMe >> m
   status <- getProcessStatus True False pid
   case status of
-    Just (Stopped _) -> do mem <- openFile ("/proc" </> (show pid) </> "mem")
-                                           ReadWriteMode
+    Just (Stopped _) -> do mem <- openBinaryFile ("/proc" </> (show pid) </> "mem")
+                                                 ReadWriteMode
                            setOptions pid
                            return $ PTH {pthPID = pid, pthMem = mem}
     _                -> error "Failed to get a stopped process."
@@ -126,7 +126,10 @@ continue = do
     _ -> continue -- TODO handle other events other than syscall
 
 getDataPT :: Ptr a -> PTracePtr a -> Int -> PTrace Int
-getDataPT = undefined
+getDataPT target source len = do
+  mem <- fmap pthMem getHandle
+  liftIO $ hSeek mem AbsoluteSeek $ fromIntegral $ unpackPtr source
+  liftIO $ hGetBuf mem target len
 
 setDataPT :: PTracePtr a -> Ptr a -> Int -> PTrace Int
 setDataPT = undefined
