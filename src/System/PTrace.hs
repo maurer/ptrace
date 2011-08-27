@@ -2,9 +2,9 @@ module System.PTrace
 (PTraceHandle
 ,PTrace
 ,runPTrace
-,PTRegs
+,PTRegs(..)
 ,continue
-,StopReason
+,StopReason(..)
 ,PTracePtr
 ,forkPT
 ,execPT
