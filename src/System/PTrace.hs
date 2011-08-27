@@ -28,9 +28,13 @@ import System.FilePath
 import Foreign.Storable
 import Foreign.Marshal.Alloc
 import Foreign.C.Error
+import Data.IORef
 
 data PTraceHandle = PTH { pthPID :: ProcessID
-                         ,pthMem :: Handle }
+                         ,pthMem :: Handle
+                         ,pthSys :: IORef SysState}
+
+data SysState = Entry | Exit
 
 {-
   We create the PTrace monad. Technically, this could be almost as powerful
@@ -72,7 +76,9 @@ forkPT m = do
     Just (Stopped _) -> do mem <- openBinaryFile ("/proc" </> (show pid) </> "mem")
                                                  ReadWriteMode
                            setOptions pid
-                           return $ PTH {pthPID = pid, pthMem = mem}
+                           e <- newIORef Entry
+                           return $ PTH {pthPID = pid, pthMem = mem,
+                                         pthSys = e}
     _                -> error "Failed to get a stopped process."
     where setOptions :: CPid -> IO ()
           setOptions pid = void $ ptraceRaw (toCReq SetOptions) pid 0 1 -- PTRACE_O_SYSGOOD
@@ -121,7 +127,13 @@ continue = do
     Just (Stopped x) | x == sigTRAP -> do
       sysgood <- liftIO $ getSysGood $ pthPID pth
       if sysgood
-        then return Syscalled --TODO make alternate for pre/post
+        then do r <- fmap pthSys getHandle
+                e <- liftIO $ readIORef r
+                case e of 
+                  Entry -> do liftIO $ writeIORef r Exit
+                              return SyscallEntry
+                  Exit  -> do liftIO $ writeIORef r Entry
+                              return SyscallExit
         else continue
     _ -> continue -- TODO handle other events other than syscall
 
