@@ -18,4 +18,4 @@ instance Storable PTRegs where
   peek      = cPeek
   poke      = cPoke
   sizeOf    = cSizeOf
-  alignment = cAlignment
+  alignment _ = 256
