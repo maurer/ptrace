@@ -5,7 +5,7 @@ module System.PTrace
 ,PTRegs(..)
 ,continue
 ,StopReason(..)
-,PTracePtr
+,PTracePtr(..)
 ,forkPT
 ,execPT
 ,detachPT
@@ -28,13 +28,17 @@ import System.FilePath
 import Foreign.Storable
 import Foreign.Marshal.Alloc
 import Foreign.C.Error
+import Control.Concurrent
 import Data.IORef
+import Data.Bits
+
+debug = liftIO . putStrLn
 
 data PTraceHandle = PTH { pthPID :: ProcessID
                          ,pthMem :: Handle
                          ,pthSys :: IORef SysState}
 
-data SysState = Entry | Exit
+data SysState = Entry | Exit deriving Show
 
 {-
   We create the PTrace monad. Technically, this could be almost as powerful
@@ -71,7 +75,7 @@ runPTrace h m = runReaderT (ptraceInner m) h
 forkPT :: IO () -> IO PTraceHandle
 forkPT m = do
   pid <- forkProcess $ traceMe >> m
-  status <- getProcessStatus True False pid
+  status <- getProcessStatus True True pid
   case status of
     Just (Stopped _) -> do mem <- openBinaryFile ("/proc" </> (show pid) </> "mem")
                                                  ReadWriteMode
@@ -120,28 +124,34 @@ setRegsPT r = ptAlloca $ \p -> do
 
 continue :: PTrace StopReason
 continue = do
+  debug "Continuing."
   pth <- getHandle
   ptrace Syscall traceNull nullPtr
   status <- liftIO $ getProcessStatus True False $ pthPID pth
   case status of
-    Just (Stopped x) | x == sigTRAP -> do
-      sysgood <- liftIO $ getSysGood $ pthPID pth
-      if sysgood
+    Just (Stopped x) | x .&. 63 == sigTRAP -> do
+      debug "Found a SIGTRAP"
+      if (x .&. 128) == 128 -- sysgood
         then do r <- fmap pthSys getHandle
+                debug "Acquired state handle"
                 e <- liftIO $ readIORef r
+                debug $ "Read state, got " ++ (show e)
                 case e of 
                   Entry -> do liftIO $ writeIORef r Exit
                               return SyscallEntry
                   Exit  -> do liftIO $ writeIORef r Entry
                               return SyscallExit
         else continue
+      | otherwise -> do liftIO $ print x
+                        continue
+    Just (Exited c) -> return $ ProgExit c
     _ -> continue -- TODO handle other events other than syscall
 
 getDataPT :: Ptr a -> PTracePtr a -> Int -> PTrace Int
 getDataPT target source len = do
   mem <- fmap pthMem getHandle
   liftIO $ hSeek mem AbsoluteSeek $ fromIntegral $ unpackPtr source
-  liftIO $ hGetBuf mem target len
+  liftIO $ hGetBufNonBlocking mem target len
 
 setDataPT :: PTracePtr a -> Ptr a -> Int -> PTrace Int
 setDataPT target source len = do
