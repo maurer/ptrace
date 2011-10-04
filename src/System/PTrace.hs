@@ -31,6 +31,7 @@ import Foreign.C.Error
 import Control.Concurrent
 import Data.IORef
 import Data.Bits
+import Control.Monad.Error
 
 debug = \_ -> return () --liftIO . putStrLn
 
@@ -39,6 +40,13 @@ data PTraceHandle = PTH { pthPID :: ProcessID
                          ,pthSys :: IORef SysState}
 
 data SysState = Entry | Exit deriving Show
+
+data PTError = ReadError
+             | WriteError
+             | UnknownError String deriving Show
+
+instance Error PTError where
+  strMsg = UnknownError
 
 {-
   We create the PTrace monad. Technically, this could be almost as powerful
@@ -50,8 +58,9 @@ data SysState = Entry | Exit deriving Show
   Similar to the ST monad though, on some level it is really just the IO monad.
   Nothing fancy is actually going on with its declaration.
 -}
-newtype PTrace a = PT { ptraceInner :: ReaderT PTraceHandle IO a }
-   deriving (Functor, Monad, MonadIO)
+newtype PTrace a = PT {
+  ptraceInner :: ErrorT PTError (ReaderT PTraceHandle IO) a
+  } deriving (Functor, Monad, MonadIO)
 
 getHandle :: PTrace PTraceHandle
 getHandle = PT $ ask
@@ -70,7 +79,11 @@ ptrace req pA pB = do
   return $ fromIntegral n
 
 runPTrace :: PTraceHandle -> PTrace a -> IO a
-runPTrace h m = runReaderT (ptraceInner m) h
+runPTrace h m = do
+  v <- runReaderT (runErrorT (ptraceInner m)) h
+  case v of
+    Right x -> return x
+    Left  e -> error (show e) --TODO propogate out
 
 forkPT :: IO () -> IO PTraceHandle
 forkPT m = do
