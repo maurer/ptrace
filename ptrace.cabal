@@ -14,9 +14,11 @@ Library
   Hs-Source-Dirs:    src
   Exposed-modules:   System.PTrace
   Other-Modules:     System.PTrace.Types, System.PTrace.Raw,
-                     System.PTrace.X86_64
+                     System.PTrace.PTRegs
   Build-depends:     base, mtl, unix, filepath, c-storable-deriving,
                      ghc-prim
   Extensions:        GeneralizedNewtypeDeriving,
                      ForeignFunctionInterface,
                      DeriveGeneric
+  If arch(x86_64)
+    Hs-Source-Dirs:    arch/amd64/
