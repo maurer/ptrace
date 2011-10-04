@@ -32,7 +32,7 @@ import Control.Concurrent
 import Data.IORef
 import Data.Bits
 
-debug = liftIO . putStrLn
+debug = \_ -> return () --liftIO . putStrLn
 
 data PTraceHandle = PTH { pthPID :: ProcessID
                          ,pthMem :: Handle
