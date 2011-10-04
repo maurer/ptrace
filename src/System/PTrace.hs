@@ -79,6 +79,7 @@ forkPT m = do
   case status of
     Just (Stopped _) -> do mem <- openBinaryFile ("/proc" </> (show pid) </> "mem")
                                                  ReadWriteMode
+                           hSetBuffering mem NoBuffering
                            setOptions pid
                            e <- newIORef Entry
                            return $ PTH {pthPID = pid, pthMem = mem,
