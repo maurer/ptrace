@@ -142,10 +142,11 @@ continue = do
                               return SyscallEntry
                   Exit  -> do liftIO $ writeIORef r Entry
                               return SyscallExit
-        else continue
-      | otherwise -> do liftIO $ print x
-                        continue
+        else return $ Sig x
+      | otherwise -> return $ Sig x
     Just (Exited c) -> return $ ProgExit c
+    Just x -> do liftIO $ print ("DANGER!", x)
+                 continue
     _ -> continue -- TODO handle other events other than syscall
 
 getDataPT :: Ptr a -> PTracePtr a -> Int -> PTrace Int

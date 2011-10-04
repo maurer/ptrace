@@ -12,7 +12,8 @@ module System.PTrace.Types
 import Foreign
 import Foreign.Ptr
 import Foreign.C.Types
-import System.PTrace.X86_64
+import System.Posix.Signals
+import System.PTrace.PTRegs
 import System.Exit
 
 newtype PTracePtr a = PTP (Ptr a) deriving (Show, Eq)
@@ -29,6 +30,7 @@ unpackPtr (PTP ptr) = ptrToWordPtr ptr
 data StopReason = SyscallEntry
                 | SyscallExit
                 | ProgExit ExitCode
+                | Sig Signal
 
 data Request =
      TraceMe
