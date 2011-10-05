@@ -6,6 +6,7 @@ module System.PTrace
 ,continue
 ,StopReason(..)
 ,PTracePtr(..)
+,PTError(..)
 ,forkPT
 ,execPT
 ,detachPT
@@ -32,6 +33,8 @@ import Control.Concurrent
 import Data.IORef
 import Data.Bits
 import Control.Monad.Error
+import Prelude hiding (catch)
+import Control.Exception
 
 debug = \_ -> return () --liftIO . putStrLn
 
@@ -62,14 +65,18 @@ newtype PTrace a = PT {
   ptraceInner :: ErrorT PTError (ReaderT PTraceHandle IO) a
   } deriving (Functor, Monad, MonadIO)
 
+instance MonadError PTError PTrace where
+  throwError e = PT $ throwError e
+  catchError m f = PT $ catchError (ptraceInner m) (ptraceInner . f)
+
 getHandle :: PTrace PTraceHandle
 getHandle = PT $ ask
 
-errNeg :: String -> PTrace Int -> PTrace ()
+errNeg :: PTError -> PTrace Int -> PTrace ()
 errNeg msg m = do
   e <- m
   if (e < 0)
-    then liftIO $ throwErrno msg
+    then throwError msg
     else return ()
 
 ptrace :: Request -> PTracePtr a -> Ptr b -> PTrace Int
@@ -78,12 +85,8 @@ ptrace req pA pB = do
   n <- liftIO $ ptraceRaw (toCReq req) (pthPID pth) (unpackPtr pA) (ptrToWordPtr pB)
   return $ fromIntegral n
 
-runPTrace :: PTraceHandle -> PTrace a -> IO a
-runPTrace h m = do
-  v <- runReaderT (runErrorT (ptraceInner m)) h
-  case v of
-    Right x -> return x
-    Left  e -> error (show e) --TODO propogate out
+runPTrace :: PTraceHandle -> PTrace a -> IO (Either PTError a)
+runPTrace h m = runReaderT (runErrorT (ptraceInner m)) h
 
 forkPT :: IO () -> IO PTraceHandle
 forkPT m = do
@@ -115,10 +118,13 @@ attachPT = undefined
 detachPT :: PTrace ()
 detachPT = undefined
 
-liftPTWrap :: ((a -> IO b) -> IO c) -> (a -> PTrace b) -> PTrace c
+liftPTWrap :: ((a -> IO (Either PTError c)) -> IO (Either PTError c)) -> (a -> PTrace c) -> PTrace c
 liftPTWrap m f = do
   h <- getHandle
-  liftIO $ m $ \x -> (runPTrace h $ f x)
+  v <- liftIO $ m $ \x -> (runPTrace h $ f x)
+  case v of
+    Left e  -> throwError e
+    Right x -> return x
 
 ptAlloca :: (Storable a) => ((Ptr a) -> PTrace b) -> PTrace b
 ptAlloca = liftPTWrap alloca
@@ -128,13 +134,13 @@ pokePT p k = liftIO $ poke p k
 
 getRegsPT :: PTrace PTRegs
 getRegsPT = ptAlloca $ \p -> do
-  errNeg "getRegsPT" $ ptrace GetRegs traceNull p
+  errNeg (UnknownError "getRegsPT") $ ptrace GetRegs traceNull p
   peekPT p
 
 setRegsPT :: PTRegs -> PTrace ()
 setRegsPT r = ptAlloca $ \p -> do
   pokePT p r
-  errNeg "setRegsPT" $ ptrace SetRegs traceNull p
+  errNeg (UnknownError "getRegsPT") $ ptrace SetRegs traceNull p
 
 continue :: PTrace StopReason
 continue = do
@@ -162,15 +168,20 @@ continue = do
                  continue
     _ -> continue -- TODO handle other events other than syscall
 
-getDataPT :: Ptr a -> PTracePtr a -> Int -> PTrace Int
+getDataPT :: Ptr a -> PTracePtr a -> Int -> PTrace ()
 getDataPT target source len = do
   mem <- fmap pthMem getHandle
   liftIO $ hSeek mem AbsoluteSeek $ fromIntegral $ unpackPtr source
-  liftIO $ hGetBufNonBlocking mem target len
-
-setDataPT :: PTracePtr a -> Ptr a -> Int -> PTrace Int
+  len' <- liftIO $ (hGetBuf mem target len) `catch` (\(_ :: IOError) -> return 0)
+  if (len' /= len)
+    then throwError ReadError
+    else return ()
+setDataPT :: PTracePtr a -> Ptr a -> Int -> PTrace ()
 setDataPT target source len = do
   mem <- fmap pthMem getHandle
   liftIO $ hSeek mem AbsoluteSeek $ fromIntegral $ unpackPtr target
-  liftIO $ hPutBufNonBlocking mem source len
-  -- TODO investigate whether hPutBufNonBlocking does what I think
+  success <- liftIO $ (do hPutBuf mem source len; return True) `catch`
+                      (\(_ :: IOError) -> return False)
+  if success
+     then return ()
+     else throwError WriteError

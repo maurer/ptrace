@@ -19,6 +19,8 @@ Library
                      ghc-prim
   Extensions:        GeneralizedNewtypeDeriving,
                      ForeignFunctionInterface,
-                     DeriveGeneric
+                     DeriveGeneric,
+                     MultiParamTypeClasses,
+                     ScopedTypeVariables
   If arch(x86_64)
     Hs-Source-Dirs:    arch/amd64/
