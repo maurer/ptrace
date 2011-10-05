@@ -58,7 +58,8 @@ instance Error PTError where
   provide useful sandboxing effects. It also implicitly has a Reader monad,
   which holds the handle to the thread being traced.
 
-  Similar to the ST monad though, on some level it is really just the IO monad.
+  Similar to the ST monad though, on some level it is really just the IO
+  monad.
   Nothing fancy is actually going on with its declaration.
 -}
 newtype PTrace a = PT {
@@ -80,8 +81,10 @@ errNeg msg m = do
 ptrace :: Request -> PTracePtr a -> Ptr b -> PTrace Int
 ptrace req pA pB = do
   pth <- getHandle
-  n <- liftIO $ ptraceRaw (toCReq req) (pthPID pth) (unpackPtr pA) (ptrToWordPtr pB)
-  return $ fromIntegral n
+  liftIO $ fmap fromIntegral $ ptraceRaw (toCReq req)
+                                         (pthPID pth)
+                                         (unpackPtr pA)
+                                         (ptrToWordPtr pB)
 
 runPTrace :: PTraceHandle -> PTrace a -> IO (Either PTError a)
 runPTrace h m = runReaderT (runErrorT (ptraceInner m)) h
@@ -91,7 +94,9 @@ forkPT m = do
   pid <- forkProcess $ traceMe >> m
   status <- getProcessStatus True True pid
   case status of
-    Just (Stopped _) -> do mem <- openBinaryFile ("/proc" </> show pid </> "mem")
+    Just (Stopped _) -> do mem <- openBinaryFile ("/proc" </>
+                                                  show pid </>
+                                                  "mem")
                                                  ReadWriteMode
                            hSetBuffering mem NoBuffering
                            setOptions pid
@@ -100,7 +105,8 @@ forkPT m = do
                                        pthSys = e}
     _                -> error "Failed to get a stopped process."
     where setOptions :: CPid -> IO ()
-          setOptions pid = void $ ptraceRaw (toCReq SetOptions) pid 0 1 -- PTRACE_O_SYSGOOD
+          setOptions pid = void $ ptraceRaw (toCReq SetOptions) pid 0 1
+                                                    -- PTRACE_O_SYSGOOD
 
 execPT :: FilePath                 -- ^ File to run
        -> Bool                     -- ^ Search Path?
@@ -116,7 +122,9 @@ attachPT = undefined
 detachPT :: PTrace ()
 detachPT = undefined
 
-liftPTWrap :: ((a -> IO (Either PTError c)) -> IO (Either PTError c)) -> (a -> PTrace c) -> PTrace c
+liftPTWrap :: ((a -> IO (Either PTError c)) -> IO (Either PTError c))
+           -> (a -> PTrace c)
+           -> PTrace c
 liftPTWrap m f = do
   h <- getHandle
   v <- liftIO $ m $ \x -> runPTrace h $ f x
@@ -170,8 +178,8 @@ getDataPT :: Ptr a -> PTracePtr a -> Int -> PTrace ()
 getDataPT target source len = do
   mem <- fmap pthMem getHandle
   liftIO $ hSeek mem AbsoluteSeek $ fromIntegral $ unpackPtr source
-  len' <- liftIO $ hGetBuf mem target len `catch` (\(_ :: IOError) -> return 0)
-  when (len' /= len) $ throwError ReadError
+  res <- liftIO $ hGetBuf mem target len `catch` (\(_ :: IOError) -> return 0)
+  when (res /= len) $ throwError ReadError
 setDataPT :: PTracePtr a -> Ptr a -> Int -> PTrace ()
 setDataPT target source len = do
   mem <- fmap pthMem getHandle
