@@ -1,22 +1,33 @@
+-- | Moderately safe bindings to the Linux ptrace facility
+--   Provides the ability to get and set both registers
+--   and data, and has a separate pointer type for remote data
+--   to help keep things straight.
 module System.PTrace
-(PTraceHandle
-,PTrace
-,runPTrace
-,PTRegs(..)
-,continue
-,StopReason(..)
-,PTracePtr(..)
-,PTError(..)
+(
+-- * Starting a trace
+PTraceHandle
 ,forkPT
 ,execPT
-,detachPT
+,PTrace
+,runPTrace
+-- * Stepping a trace
+,StopReason(..)
+,PTError(..)
+,continue
+-- * Remote Pointers
+,PTracePtr(..)
+,pTracePlusPtr
+-- * Interacting with the target
+,PTRegs(..)
 ,getRegsPT
 ,setRegsPT
 ,getDataPT
 ,setDataPT
-,pTracePlusPtr
+-- * Ending the trace
+,detachPT
 ) where
 
+import Prelude hiding (catch)
 import Control.Monad.Reader
 import System.Posix.Process
 import System.Posix.Types
@@ -28,12 +39,9 @@ import System.IO
 import System.FilePath
 import Foreign.Storable
 import Foreign.Marshal.Alloc
-import Foreign.C.Error
-import Control.Concurrent
 import Data.IORef
 import Data.Bits
 import Control.Monad.Error
-import Prelude hiding (catch)
 import Control.Exception
 
 debug _ = return () --liftIO . putStrLn
