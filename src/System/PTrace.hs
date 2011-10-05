@@ -36,7 +36,7 @@ import Control.Monad.Error
 import Prelude hiding (catch)
 import Control.Exception
 
-debug = \_ -> return () --liftIO . putStrLn
+debug _ = return () --liftIO . putStrLn
 
 data PTraceHandle = PTH { pthPID :: ProcessID
                          ,pthMem :: Handle
@@ -70,14 +70,12 @@ instance MonadError PTError PTrace where
   catchError m f = PT $ catchError (ptraceInner m) (ptraceInner . f)
 
 getHandle :: PTrace PTraceHandle
-getHandle = PT $ ask
+getHandle = PT ask
 
 errNeg :: PTError -> PTrace Int -> PTrace ()
 errNeg msg m = do
   e <- m
-  if (e < 0)
-    then throwError msg
-    else return ()
+  when (e < 0) $ throwError msg
 
 ptrace :: Request -> PTracePtr a -> Ptr b -> PTrace Int
 ptrace req pA pB = do
@@ -93,13 +91,13 @@ forkPT m = do
   pid <- forkProcess $ traceMe >> m
   status <- getProcessStatus True True pid
   case status of
-    Just (Stopped _) -> do mem <- openBinaryFile ("/proc" </> (show pid) </> "mem")
+    Just (Stopped _) -> do mem <- openBinaryFile ("/proc" </> show pid </> "mem")
                                                  ReadWriteMode
                            hSetBuffering mem NoBuffering
                            setOptions pid
                            e <- newIORef Entry
-                           return $ PTH {pthPID = pid, pthMem = mem,
-                                         pthSys = e}
+                           return PTH {pthPID = pid, pthMem = mem,
+                                       pthSys = e}
     _                -> error "Failed to get a stopped process."
     where setOptions :: CPid -> IO ()
           setOptions pid = void $ ptraceRaw (toCReq SetOptions) pid 0 1 -- PTRACE_O_SYSGOOD
@@ -121,12 +119,12 @@ detachPT = undefined
 liftPTWrap :: ((a -> IO (Either PTError c)) -> IO (Either PTError c)) -> (a -> PTrace c) -> PTrace c
 liftPTWrap m f = do
   h <- getHandle
-  v <- liftIO $ m $ \x -> (runPTrace h $ f x)
+  v <- liftIO $ m $ \x -> runPTrace h $ f x
   case v of
     Left e  -> throwError e
     Right x -> return x
 
-ptAlloca :: (Storable a) => ((Ptr a) -> PTrace b) -> PTrace b
+ptAlloca :: (Storable a) => (Ptr a -> PTrace b) -> PTrace b
 ptAlloca = liftPTWrap alloca
 
 peekPT p = liftIO $ peek p
@@ -155,7 +153,7 @@ continue = do
         then do r <- fmap pthSys getHandle
                 debug "Acquired state handle"
                 e <- liftIO $ readIORef r
-                debug $ "Read state, got " ++ (show e)
+                debug $ "Read state, got " ++ show e
                 case e of 
                   Entry -> do liftIO $ writeIORef r Exit
                               return SyscallEntry
@@ -172,16 +170,12 @@ getDataPT :: Ptr a -> PTracePtr a -> Int -> PTrace ()
 getDataPT target source len = do
   mem <- fmap pthMem getHandle
   liftIO $ hSeek mem AbsoluteSeek $ fromIntegral $ unpackPtr source
-  len' <- liftIO $ (hGetBuf mem target len) `catch` (\(_ :: IOError) -> return 0)
-  if (len' /= len)
-    then throwError ReadError
-    else return ()
+  len' <- liftIO $ hGetBuf mem target len `catch` (\(_ :: IOError) -> return 0)
+  when (len' /= len) $ throwError ReadError
 setDataPT :: PTracePtr a -> Ptr a -> Int -> PTrace ()
 setDataPT target source len = do
   mem <- fmap pthMem getHandle
   liftIO $ hSeek mem AbsoluteSeek $ fromIntegral $ unpackPtr target
   success <- liftIO $ (do hPutBuf mem source len; return True) `catch`
                       (\(_ :: IOError) -> return False)
-  if success
-     then return ()
-     else throwError WriteError
+  unless success $ throwError WriteError
