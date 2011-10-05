@@ -23,4 +23,6 @@ Library
                      MultiParamTypeClasses,
                      ScopedTypeVariables
   If arch(x86_64)
-    Hs-Source-Dirs:    arch/amd64/
+    Hs-Source-Dirs:    arch/x86_64/
+  If arch(i386)
+    Hs-Source-Dirs:    arch/i386/
