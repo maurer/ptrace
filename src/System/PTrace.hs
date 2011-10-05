@@ -174,12 +174,11 @@ continue = do
                  continue
     _ -> continue -- TODO handle other events other than syscall
 
-getDataPT :: Ptr a -> PTracePtr a -> Int -> PTrace ()
+getDataPT :: Ptr a -> PTracePtr a -> Int -> PTrace Int
 getDataPT target source len = do
   mem <- fmap pthMem getHandle
   liftIO $ hSeek mem AbsoluteSeek $ fromIntegral $ unpackPtr source
-  res <- liftIO $ hGetBuf mem target len `catch` (\(_ :: IOError) -> return 0)
-  when (res /= len) $ throwError ReadError
+  liftIO $ hGetBuf mem target len `catch` (\(_ :: IOError) -> return 0)
 setDataPT :: PTracePtr a -> Ptr a -> Int -> PTrace ()
 setDataPT target source len = do
   mem <- fmap pthMem getHandle
