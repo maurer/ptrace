@@ -45,22 +45,22 @@ import Data.IORef
 import Data.Bits
 import Control.Monad.Error
 import Control.Exception
+import System.PTrace.PTRegs
+
+--TODO load from header
+
+sysGood = 0x80
+ptraceEventFork :: Signal
+ptraceEventFork = 0x10
+ptraceEventVFork :: Signal
+ptraceEventVFork = 0x20
+traceSysGood = 0x1
+traceFork = 0x2
+traceVFork = 0x4
+fork  = ptraceEventFork `shiftL` 8
+vfork = ptraceEventVFork `shiftL` 8
 
 debug _ = return () --liftIO . putStrLn
-
--- | Abstract type representing a handle to a trace in progress
---   Using 'detachPT' or 'killPT' invalidates the 'PTraceHandle', similar
---   to what happens if you 'close' a 'Handle'. It is also invalidated
---   on any outside action that terminates the traced process.
---   Note: While you may think you can cleverly serialize this to another
---   thread, you cannot. The system pins the permissions to an individual
---   thread, so migrating the handle will not allow another thread to
---   trace properly.
-data PTraceHandle = PTH { pthPID :: ProcessID
-                         ,pthMem :: Handle
-                         ,pthSys :: IORef SysState}
-
-data SysState = Entry | Exit deriving Show
 
 -- | Types of errors occurring inside 'PTrace'
 --   Only basic information is available at the moment, more may
@@ -127,19 +127,22 @@ forkPT m = do
   pid <- forkProcess $ traceMe >> m
   status <- getProcessStatus True True pid
   case status of
-    Just (Stopped _) -> do mem <- openBinaryFile ("/proc" </>
-                                                  show pid </>
-                                                  "mem")
-                                                 ReadWriteMode
-                           hSetBuffering mem NoBuffering
-                           setOptions pid
-                           e <- newIORef Entry
-                           return PTH {pthPID = pid, pthMem = mem,
-                                       pthSys = e}
+    Just (Stopped _) -> makeHandle pid
     _                -> error "Failed to get a stopped process."
-    where setOptions :: CPid -> IO ()
-          setOptions pid = void $ ptraceRaw (toCReq SetOptions) pid 0 1
-                                                    -- PTRACE_O_SYSGOOD
+
+makeHandle :: CPid -> IO PTraceHandle
+makeHandle pid = do
+  mem <- openBinaryFile ("/proc" </> show pid </> "mem") ReadWriteMode
+  hSetBuffering mem NoBuffering
+  setOptions pid
+  e <- newIORef Entry
+  return PTH {pthPID = pid, pthMem = mem,
+                       pthSys = e}
+  where setOptions :: CPid -> IO ()
+        setOptions pid = void $ ptraceRaw (toCReq SetOptions)
+                                          pid
+                                          0
+                                          (traceSysGood .|. traceFork)
 
 -- | Takes in a description of a program to execute, then starts it
 --   in a tracing context, and gives you back the handle
@@ -202,8 +205,9 @@ continue = do
   case status of
     Just (Stopped x) | x .&. 63 == sigTRAP -> do
       debug "Found a SIGTRAP"
-      if (x .&. 128) == 128 -- sysgood
-        then do r <- fmap pthSys getHandle
+      case x of
+        _ | (x .&. sysGood) == sysGood -> do
+                r <- fmap pthSys getHandle
                 debug "Acquired state handle"
                 e <- liftIO $ readIORef r
                 debug $ "Read state, got " ++ show e
@@ -212,7 +216,13 @@ continue = do
                               return SyscallEntry
                   Exit  -> do liftIO $ writeIORef r Entry
                               return SyscallExit
-        else return $ Sig x
+          | (x .&. fork) == fork -> do
+                pid <- ptAlloca $ \pp -> do
+                         ptrace GetEventMsg traceNull pp
+                         liftIO $ peek pp
+                h <- liftIO $ makeHandle pid
+                return $ Forked h
+          | otherwise -> return $ Sig x
       | otherwise -> return $ Sig x
     Just (Exited c) -> return $ ProgExit c
     Just x -> do liftIO $ print ("DANGER!", x)
