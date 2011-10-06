@@ -2,6 +2,8 @@
 --   Provides the ability to get and set both registers
 --   and data, and has a separate pointer type for remote data
 --   to help keep things straight.
+--   Please note, when using this library, you MUST run in a bound thread.
+--   If you do not, you will receive spurious permissions errors.
 module System.PTrace
 (
 -- * Starting a trace
