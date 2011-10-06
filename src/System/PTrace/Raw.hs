@@ -18,14 +18,3 @@ foreign import ccall unsafe "ptrace" ptraceRaw :: CInt
 
 traceMe :: IO ()
 traceMe = void $ ptraceRaw 0 0 0 0
-
-foreign import ccall unsafe "waitpid" waitpidRaw :: CPid
-                                                 -> Ptr CInt
-                                                 -> CInt
-                                                 -> IO CPid
-
-getSysGood :: CPid -> IO Bool
-getSysGood pid  = alloca $ \status -> do
-  throwErrnoIfMinus1 "waitpid" $ waitpidRaw pid status 0
-  stat <- peek status
-  return $ (0x80 .&. stat) /= 0
