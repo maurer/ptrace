@@ -1,10 +1,10 @@
 Name:                ptrace
 Version:             0.1
-License:             AllRightsReserved
+License:             BSD3
 License-file:        LICENSE
 Author:              Matthew Maurer
-Maintainer:          maurer@ugcs.caltech.edu
--- Copyright:           
+Maintainer:          maurer@matthewmaurer.org
+Copyright:           Matthew Maurer (c) 2011 
 Category:            System
 Build-type:          Simple
 Cabal-version:       >=1.2
@@ -23,6 +23,6 @@ Library
                      MultiParamTypeClasses,
                      ScopedTypeVariables
   If arch(x86_64)
-    Hs-Source-Dirs:    arch/x86_64/
+    Hs-Source-Dirs:  arch/x86_64/
   If arch(i386)
-    Hs-Source-Dirs:    arch/i386/
+    Hs-Source-Dirs:  arch/i386/
