@@ -6,9 +6,10 @@ import Foreign.CStorable
 import GHC.Generics
 
 -- PENDING CStorable merging into Storable, simplify this
+-- | Set of available registers.
 data PTRegs =
   PTRegs {ebx, ecx, edx, esi, edi, ebp, eax, xds, xes, xfs, xgs, orig_eax,
-          eip, xcs, eflags, esp, xss :: Word64} deriving (Generic, Show)
+          eip, xcs, eflags, esp, xss :: Word32} deriving (Generic, Show)
 
 instance CStorable PTRegs
 

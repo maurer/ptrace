@@ -8,6 +8,7 @@ module System.PTrace
 PTraceHandle
 ,forkPT
 ,execPT
+-- * PTrace Environment
 ,PTrace
 ,runPTrace
 -- * Stepping a trace
@@ -25,6 +26,7 @@ PTraceHandle
 ,setDataPT
 -- * Ending the trace
 ,detachPT
+,killPT
 ) where
 
 import Prelude hiding (catch)
@@ -46,15 +48,27 @@ import Control.Exception
 
 debug _ = return () --liftIO . putStrLn
 
+-- | Abstract type representing a handle to a trace in progress
+--   Using 'detachPT' or 'killPT' invalidates the 'PTraceHandle', similar
+--   to what happens if you 'close' a 'Handle'. It is also invalidated
+--   on any outside action that terminates the traced process.
+--   Note: While you may think you can cleverly serialize this to another
+--   thread, you cannot. The system pins the permissions to an individual
+--   thread, so migrating the handle will not allow another thread to
+--   trace properly.
 data PTraceHandle = PTH { pthPID :: ProcessID
                          ,pthMem :: Handle
                          ,pthSys :: IORef SysState}
 
 data SysState = Entry | Exit deriving Show
 
-data PTError = ReadError
-             | WriteError
-             | UnknownError String deriving Show
+-- | Types of errors occurring inside 'PTrace'
+--   Only basic information is available at the moment, more may
+--   be added later.
+data PTError = ReadError           -- ^ Remote read failed
+             | WriteError          -- ^ Remote write failed
+             | UnknownError String -- ^ Other error
+               deriving Show
 
 instance Error PTError where
   strMsg = UnknownError
@@ -70,6 +84,12 @@ instance Error PTError where
   monad.
   Nothing fancy is actually going on with its declaration.
 -}
+-- | This monad encapsulates the resources needed for basic ptrace
+--   actions, holding the necessary references to output sensical
+--   information in a timely fashion, and wrapping up errors in a pure
+--   fashion. It is also an instance of 'MonadIO', should you feel the need
+--   to access IO from inside it (ptracing is inherently unsafe, so this
+--   should not be too terrifying).
 newtype PTrace a = PT {
   ptraceInner :: ErrorT PTError (ReaderT PTraceHandle IO) a
   } deriving (Functor, Monad, MonadIO)
@@ -94,10 +114,15 @@ ptrace req pA pB = do
                                          (unpackPtr pA)
                                          (ptrToWordPtr pB)
 
+-- | Given a 'PTraceHandle' (as created by 'forkPT' or 'execPT'),
+--   allows you to perform a PTrace action on it.
 runPTrace :: PTraceHandle -> PTrace a -> IO (Either PTError a)
 runPTrace h m = runReaderT (runErrorT (ptraceInner m)) h
 
-forkPT :: IO () -> IO PTraceHandle
+-- | Given an IO action, spawns it in a new thread, stops it, and gives
+--   you back a handle to trace it with.
+forkPT :: IO ()           -- ^ The action to trace
+       -> IO PTraceHandle -- ^ A handle to the paused action
 forkPT m = do
   pid <- forkProcess $ traceMe >> m
   status <- getProcessStatus True True pid
@@ -116,19 +141,27 @@ forkPT m = do
           setOptions pid = void $ ptraceRaw (toCReq SetOptions) pid 0 1
                                                     -- PTRACE_O_SYSGOOD
 
+-- | Takes in a description of a program to execute, then starts it
+--   in a tracing context, and gives you back the handle
 execPT :: FilePath                 -- ^ File to run
        -> Bool                     -- ^ Search Path?
        -> [String]                 -- ^ Arguments
        -> Maybe [(String, String)] -- ^ Environment
-       -> IO PTraceHandle          -- ^ Traced Process Handle
+       -> IO PTraceHandle          -- ^ A handle to the paused executable
 execPT f s a e = forkPT (executeFile f s a e)
 
 attachPT :: ProcessID
          -> IO PTraceHandle
 attachPT = undefined
 
+-- | Releases the handle being traced, allowing the process to do as it
+--   wishes.
 detachPT :: PTrace ()
-detachPT = undefined
+detachPT = void $ ptrace Detach traceNull nullPtr
+
+-- | Kills the process being traced.
+killPT :: PTrace ()
+killPT = void $ ptrace Kill traceNull nullPtr
 
 liftPTWrap :: ((a -> IO (Either PTError c)) -> IO (Either PTError c))
            -> (a -> PTrace c)
@@ -146,17 +179,21 @@ ptAlloca = liftPTWrap alloca
 peekPT p = liftIO $ peek p
 pokePT p k = liftIO $ poke p k
 
+-- | Acquires the accessible register set from the CPU
 getRegsPT :: PTrace PTRegs
 getRegsPT = ptAlloca $ \p -> do
   errNeg (UnknownError "getRegsPT") $ ptrace GetRegs traceNull p
   peekPT p
 
+-- | Sets registers, when possible, on to match the specification on the CPU
 setRegsPT :: PTRegs -> PTrace ()
 setRegsPT r = ptAlloca $ \p -> do
   pokePT p r
   errNeg (UnknownError "getRegsPT") $ ptrace SetRegs traceNull p
 
-continue :: PTrace StopReason
+-- | Resumes execution of the traced process until it reaches another
+--   stopping point, then returns why it stopped.
+continue :: PTrace StopReason -- ^ Why it stopped
 continue = do
   debug "Continuing."
   pth <- getHandle
@@ -182,12 +219,28 @@ continue = do
                  continue
     _ -> continue -- TODO handle other events other than syscall
 
-getDataPT :: Ptr a -> PTracePtr a -> Int -> PTrace Int
+-- | Attempts to read up to the specified length from the source into the
+--   destination.
+--   It will still succeed on non-erroring partial reads, and will return
+--   the number of bytes read.
+getDataPT :: Ptr a       -- ^ Destination buffer
+          -> PTracePtr a -- ^ Source buffer
+          -> Int         -- ^ Max Length
+          -> PTrace Int  -- ^ Length Read
 getDataPT target source len = do
   mem <- fmap pthMem getHandle
   liftIO $ hSeek mem AbsoluteSeek $ fromIntegral $ unpackPtr source
-  liftIO $ hGetBuf mem target len `catch` (\(_ :: IOError) -> return 0)
-setDataPT :: PTracePtr a -> Ptr a -> Int -> PTrace ()
+  v <- liftIO $ fmap Right (hGetBuf mem target len) `catch`
+                (\(_ :: IOError) -> return $ Left ReadError)
+  case v of
+    Left e  -> throwError e
+    Right x -> return x
+
+-- | Attempts to write the specified length into the target from the source.
+setDataPT :: PTracePtr a -- ^ Destination buffer
+          -> Ptr a       -- ^ Source buffer
+          -> Int         -- ^ Length
+          -> PTrace ()
 setDataPT target source len = do
   mem <- fmap pthMem getHandle
   liftIO $ hSeek mem AbsoluteSeek $ fromIntegral $ unpackPtr target

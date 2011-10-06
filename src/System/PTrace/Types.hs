@@ -16,21 +16,31 @@ import System.Posix.Signals
 import System.PTrace.PTRegs
 import System.Exit
 
-newtype PTracePtr a = PTP (Ptr a) deriving (Show, Eq)
+-- | Simple wrapper newtype around a pointer to make it a tracing
+--   pointer. Note that the storable instance will only work if the
+--   target architecture is the same as the tracing architecture
+newtype PTracePtr a = PTP (Ptr a) deriving (Show, Storable, Eq)
 
+--TODO make a ptraceptr reflect the target
+
+-- | Advances the pointer in the same manner as 'plusPtr' would. May not
+--   operate as expected if the traced architecture does not match the
+--   one doing the tracing
 pTracePlusPtr :: PTracePtr a -> Int -> PTracePtr a
 pTracePlusPtr (PTP fp) n = PTP $ fp `plusPtr` n
 
+-- | A null pointer to anything (essentially the equivalent of the C NULL
 traceNull :: PTracePtr a
 traceNull = PTP nullPtr
 
 unpackPtr :: PTracePtr a -> WordPtr
 unpackPtr (PTP ptr) = ptrToWordPtr ptr
 
-data StopReason = SyscallEntry
-                | SyscallExit
-                | ProgExit ExitCode
-                | Sig Signal
+-- | Indicates why the trace has returned control to you
+data StopReason = SyscallEntry      -- ^ Process is about to syscall
+                | SyscallExit       -- ^ Process has just syscalled
+                | ProgExit ExitCode -- ^ Exited with specified code
+                | Sig Signal        -- ^ Received specified signal
 
 data Request =
      TraceMe
