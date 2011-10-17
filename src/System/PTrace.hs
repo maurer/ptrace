@@ -56,11 +56,12 @@ ptraceEventFork :: Signal
 ptraceEventFork = 0x10
 ptraceEventVFork :: Signal
 ptraceEventVFork = 0x20
+ptraceEventClone :: Signal
+ptraceEventClone = 0x40
 traceSysGood = 0x1
 traceFork = 0x2
 traceVFork = 0x4
-fork  = ptraceEventFork `shiftL` 8
-vfork = ptraceEventVFork `shiftL` 8
+traceClone = 0x8
 
 debug _ = return () --liftIO . putStrLn
 
@@ -144,7 +145,7 @@ makeHandle pid = do
         setOptions pid = void $ ptraceRaw (toCReq SetOptions)
                                           pid
                                           0
-                                          (traceSysGood .|. traceFork)
+                                          (traceSysGood .|. traceFork .|. traceClone)
 
 -- | Takes in a description of a program to execute, then starts it
 --   in a tracing context, and gives you back the handle
@@ -203,10 +204,12 @@ continue = do
   debug "Continuing."
   pth <- getHandle
   ptrace Syscall traceNull nullPtr
-  status <- liftIO $ getProcessStatus True False $ pthPID pth
+  (ev, status) <- liftIO $ getEv $ pthPID pth
+  liftIO $ putStrLn $ "Event code: " ++ (show ev)
   case status of
-    Just (Stopped x) | x .&. 63 == sigTRAP -> do
+    (Stopped x) | x .&. 63 == sigTRAP -> do
       debug "Found a SIGTRAP"
+
       case x of
         _ | (x .&. sysGood) == sysGood -> do
                 r <- fmap pthSys getHandle
@@ -218,18 +221,21 @@ continue = do
                               return SyscallEntry
                   Exit  -> do liftIO $ writeIORef r Entry
                               return SyscallExit
-          | (x .&. fork) == fork -> do
+          | (ev .&. ptraceEventFork) == ptraceEventFork -> do
                 pid <- ptAlloca $ \pp -> do
                          ptrace GetEventMsg traceNull pp
                          liftIO $ peek pp
-                h <- liftIO $ makeHandle pid
-                return $ Forked h
+                return $ Forked pid
+          | (ev .&. ptraceEventClone) == ptraceEventClone -> do
+                pid <- ptAlloca $ \pp -> do
+                         ptrace GetEventMsg traceNull pp
+                         liftIO $ peek pp
+                return $ Cloned pid
           | otherwise -> return $ Sig x
       | otherwise -> return $ Sig x
-    Just (Exited c) -> return $ ProgExit c
-    Just x -> do liftIO $ print ("DANGER!", x)
-                 continue
-    _ -> continue -- TODO handle other events other than syscall
+    (Exited c) -> return $ ProgExit c
+    x -> do liftIO $ print ("DANGER!", x)
+            continue
 
 -- | Attempts to read up to the specified length from the source into the
 --   destination.
