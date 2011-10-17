@@ -52,15 +52,7 @@ import System.PTrace.PTRegs
 --TODO load from header
 
 sysGood = 0x80
-ptraceEventFork :: Signal
-ptraceEventFork = 0x10
-ptraceEventVFork :: Signal
-ptraceEventVFork = 0x20
 traceSysGood = 0x1
-traceFork = 0x2
-traceVFork = 0x4
-fork  = ptraceEventFork `shiftL` 8
-vfork = ptraceEventVFork `shiftL` 8
 
 debug _ = return () --liftIO . putStrLn
 
@@ -144,7 +136,7 @@ makeHandle pid = do
         setOptions pid = void $ ptraceRaw (toCReq SetOptions)
                                           pid
                                           0
-                                          (traceSysGood .|. traceFork)
+                                          traceSysGood
 
 -- | Takes in a description of a program to execute, then starts it
 --   in a tracing context, and gives you back the handle
@@ -218,12 +210,6 @@ continue = do
                               return SyscallEntry
                   Exit  -> do liftIO $ writeIORef r Entry
                               return SyscallExit
-          | (x .&. fork) == fork -> do
-                pid <- ptAlloca $ \pp -> do
-                         ptrace GetEventMsg traceNull pp
-                         liftIO $ peek pp
-                h <- liftIO $ makeHandle pid
-                return $ Forked h
           | otherwise -> return $ Sig x
       | otherwise -> return $ Sig x
     Just (Exited c) -> return $ ProgExit c

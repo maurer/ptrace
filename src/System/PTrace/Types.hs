@@ -50,7 +50,6 @@ data StopReason = SyscallEntry        -- ^ Process is about to syscall
                 | SyscallExit         -- ^ Process has just syscalled
                 | ProgExit ExitCode   -- ^ Exited with specified code
                 | Sig Signal          -- ^ Received specified signal
-                | Forked PTraceHandle -- ^ Process forked, new handle
 
 data Request =
      TraceMe
