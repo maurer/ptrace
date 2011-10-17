@@ -20,14 +20,13 @@ foreign import ccall unsafe "ptrace" ptraceRaw :: CInt
 traceMe :: IO ()
 traceMe = void $ ptraceRaw 0 0 0 0
 
-foreign import ccall unsafe "waitpid" waitpidRaw :: CPid
-                                                 -> Ptr CInt
-                                                 -> CInt
-                                                 -> IO CInt
+foreign import ccall unsafe "wait" waitpidRaw :: Ptr CInt
+                                              -> CInt
+                                              -> IO CPid
 
-getEv :: CPid -> IO (CInt, ProcessStatus)
-getEv pid = alloca $ \status -> do
-  throwErrnoIfMinus1 "waitpid" $ waitpidRaw pid status 0
+getEv :: IO (CPid, CInt, ProcessStatus)
+getEv = alloca $ \status -> do
+  pid <- throwErrnoIfMinus1 "wait" $ waitpidRaw status 0
   stat  <- peek status
   stat' <- decipherWaitStatus stat
-  return $ ((stat `shiftR` 8) .&. 0xFFF, stat')
+  return $ (pid, (stat `shiftR` 16) .&. 0xFFF, stat')

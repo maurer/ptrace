@@ -16,6 +16,8 @@ import System.PTrace.PTRegs
 --   target architecture is the same as the tracing architecture
 newtype PTracePtr a = PTP (Ptr a) deriving (Show, Storable, Eq)
 
+newtype PPid = P CPid deriving (Ord, Eq)
+
 --TODO make a ptraceptr reflect the target
 
 -- | Advances the pointer in the same manner as 'plusPtr' would. May not
@@ -40,19 +42,15 @@ unpackPtr (PTP ptr) = ptrToWordPtr ptr
 --   thread, so migrating the handle will not allow another thread to
 --   trace properly.
 data PTraceHandle = PTH { pthPID :: ProcessID
-                         ,pthMem :: Handle
-                         ,pthSys :: IORef SysState}
+                         ,pthMem :: Handle}
 
 data SysState = Entry | Exit deriving Show
 
 -- | Indicates why the trace has returned control to you
-data StopReason = SyscallEntry        -- ^ Process is about to syscall
-                | SyscallExit         -- ^ Process has just syscalled
+data StopReason = SyscallState        -- ^ Process has just switched syscall state
                 | ProgExit ExitCode   -- ^ Exited with specified code
                 | Sig Signal          -- ^ Received specified signal
-                | Forked ProcessID    -- ^ Process forked, new pid
-                | Cloned ProcessID    -- ^ Process cloned, new pid
-                deriving Show
+                | Forked (PPid, PTraceHandle)
 
 data Request =
      TraceMe
