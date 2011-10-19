@@ -4,19 +4,25 @@
 --   to help keep things straight.
 --   Please note, when using this library, you MUST run in a bound thread.
 --   If you do not, you will receive spurious permissions errors.
+--   Additionally, you may not spawn any children of this thread
+--   manually. Doing so 
 module System.PTrace
 (
 -- * Starting a trace
 PTraceHandle
+,getPPid
 ,forkPT
 ,execPT
 -- * PTrace Environment
 ,PTrace
 ,runPTrace
+,makePPid
+,PPid(..)
 -- * Stepping a trace
 ,StopReason(..)
 ,PTError(..)
-,continue
+,advance
+,nextEvent
 -- * Remote Pointers
 ,PTracePtr(..)
 ,pTracePlusPtr
@@ -52,7 +58,18 @@ import System.PTrace.PTRegs
 --TODO load from header
 
 sysGood = 0x80
+ptraceEventFork :: Signal
+ptraceEventFork = 0x1
+ptraceEventVFork :: Signal
+ptraceEventVFork = 0x2
+ptraceEventClone :: Signal
+ptraceEventClone = 0x4
 traceSysGood = 0x1
+traceFork = 0x2
+traceVFork = 0x4
+traceClone = 0x8
+
+makePPid = P
 
 debug _ = return () --liftIO . putStrLn
 
@@ -66,6 +83,8 @@ data PTError = ReadError           -- ^ Remote read failed
 
 instance Error PTError where
   strMsg = UnknownError
+
+getPPid pth = P $ pthPID pth
 
 {-
   We create the PTrace monad. Technically, this could be almost as powerful
@@ -103,10 +122,13 @@ errNeg msg m = do
 ptrace :: Request -> PTracePtr a -> Ptr b -> PTrace Int
 ptrace req pA pB = do
   pth <- getHandle
-  liftIO $ fmap fromIntegral $ ptraceRaw (toCReq req)
-                                         (pthPID pth)
-                                         (unpackPtr pA)
-                                         (ptrToWordPtr pB)
+  liftIO $ ptrace_pid (pthPID pth) req pA pB
+
+ptrace_pid pid req pA pB =
+  fmap fromIntegral $ ptraceRaw (toCReq req)
+                                pid
+                                (unpackPtr pA)
+                                (ptrToWordPtr pB)
 
 -- | Given a 'PTraceHandle' (as created by 'forkPT' or 'execPT'),
 --   allows you to perform a PTrace action on it.
@@ -129,14 +151,12 @@ makeHandle pid = do
   mem <- openBinaryFile ("/proc" </> show pid </> "mem") ReadWriteMode
   hSetBuffering mem NoBuffering
   setOptions pid
-  e <- newIORef Entry
-  return PTH {pthPID = pid, pthMem = mem,
-                       pthSys = e}
+  return PTH {pthPID = pid, pthMem = mem}
   where setOptions :: CPid -> IO ()
         setOptions pid = void $ ptraceRaw (toCReq SetOptions)
                                           pid
                                           0
-                                          traceSysGood
+                                          (traceSysGood .|. traceFork .|. traceClone)
 
 -- | Takes in a description of a program to execute, then starts it
 --   in a tracing context, and gives you back the handle
@@ -188,35 +208,32 @@ setRegsPT r = ptAlloca $ \p -> do
   pokePT p r
   errNeg (UnknownError "getRegsPT") $ ptrace SetRegs traceNull p
 
--- | Resumes execution of the traced process until it reaches another
---   stopping point, then returns why it stopped.
-continue :: PTrace StopReason -- ^ Why it stopped
-continue = do
-  debug "Continuing."
-  pth <- getHandle
-  ptrace Syscall traceNull nullPtr
-  status <- liftIO $ getProcessStatus True False $ pthPID pth
-  case status of
-    Just (Stopped x) | x .&. 63 == sigTRAP -> do
-      debug "Found a SIGTRAP"
-      case x of
-        _ | (x .&. sysGood) == sysGood -> do
-                r <- fmap pthSys getHandle
-                debug "Acquired state handle"
-                e <- liftIO $ readIORef r
-                debug $ "Read state, got " ++ show e
-                case e of 
-                  Entry -> do liftIO $ writeIORef r Exit
-                              return SyscallEntry
-                  Exit  -> do liftIO $ writeIORef r Entry
-                              return SyscallExit
-          | otherwise -> return $ Sig x
-      | otherwise -> return $ Sig x
-    Just (Exited c) -> return $ ProgExit c
-    Just x -> do liftIO $ print ("DANGER!", x)
-                 continue
-    _ -> continue -- TODO handle other events other than syscall
+-- | Advances whatever thread we are in the context of
+advance :: PTrace ()
+advance = void $ ptrace Syscall traceNull nullPtr
 
+-- | Matches the next event which occurs on a traced thread
+nextEvent :: IO (PPid, StopReason) -- ^ Why it stopped
+nextEvent = do
+  (pid, ev, status) <- getEv
+  putStrLn $ "Event code: " ++ (show ev)
+  r <- case status of
+         (Stopped x) | x .&. 63 == sigTRAP -> do
+           debug "Found a SIGTRAP"
+           case x of
+             _ | (x .&. sysGood) == sysGood -> return SyscallState
+               | ((ev .&. ptraceEventFork) == ptraceEventFork)
+                 || ((ev .&. ptraceEventClone) == ptraceEventClone) -> do
+                     pid' <- alloca $ \pp -> do
+                               ptrace_pid pid GetEventMsg traceNull pp
+                               liftIO $ peek pp
+                     h <- makeHandle pid'
+                     return $ Forked h
+               | otherwise -> return $ Sig x
+           | otherwise -> return $ Sig x
+         (Exited c) -> return $ ProgExit c
+         x -> error $ "Unhandled status: " ++ (show x)
+  return (P pid, r)
 -- | Attempts to read up to the specified length from the source into the
 --   destination.
 --   It will still succeed on non-erroring partial reads, and will return
