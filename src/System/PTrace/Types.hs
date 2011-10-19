@@ -50,7 +50,7 @@ data SysState = Entry | Exit deriving Show
 data StopReason = SyscallState        -- ^ Process has just switched syscall state
                 | ProgExit ExitCode   -- ^ Exited with specified code
                 | Sig Signal          -- ^ Received specified signal
-                | Forked (PPid, PTraceHandle)
+                | Forked PTraceHandle
 
 data Request =
      TraceMe

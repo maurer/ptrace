@@ -10,13 +10,14 @@ module System.PTrace
 (
 -- * Starting a trace
 PTraceHandle
+,getPPid
 ,forkPT
 ,execPT
 -- * PTrace Environment
 ,PTrace
 ,runPTrace
 ,makePPid
-,PPid
+,PPid(..)
 -- * Stepping a trace
 ,StopReason(..)
 ,PTError(..)
@@ -82,6 +83,8 @@ data PTError = ReadError           -- ^ Remote read failed
 
 instance Error PTError where
   strMsg = UnknownError
+
+getPPid pth = P $ pthPID pth
 
 {-
   We create the PTrace monad. Technically, this could be almost as powerful
@@ -206,7 +209,7 @@ setRegsPT r = ptAlloca $ \p -> do
   errNeg (UnknownError "getRegsPT") $ ptrace SetRegs traceNull p
 
 -- | Advances whatever thread we are in the context of
-advance :: PTrace()
+advance :: PTrace ()
 advance = void $ ptrace Syscall traceNull nullPtr
 
 -- | Matches the next event which occurs on a traced thread
@@ -225,7 +228,7 @@ nextEvent = do
                                ptrace_pid pid GetEventMsg traceNull pp
                                liftIO $ peek pp
                      h <- makeHandle pid'
-                     return $ Forked (P pid', h)
+                     return $ Forked h
                | otherwise -> return $ Sig x
            | otherwise -> return $ Sig x
          (Exited c) -> return $ ProgExit c
