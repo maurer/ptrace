@@ -26,6 +26,9 @@ newtype PPid = P CPid deriving (Ord, Eq)
 pTracePlusPtr :: PTracePtr a -> Int -> PTracePtr a
 pTracePlusPtr (PTP fp) n = PTP $ fp `plusPtr` n
 
+
+pTraceMinusPtr :: PTracePtr a -> PTracePtr a -> Int
+pTraceMinusPtr (PTP fp) (PTP fp2) = minusPtr fp fp2
 -- | A null pointer to anything (essentially the equivalent of the C NULL
 traceNull :: PTracePtr a
 traceNull = PTP nullPtr

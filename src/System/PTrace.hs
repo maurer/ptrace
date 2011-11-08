@@ -54,6 +54,7 @@ import Data.Bits
 import Control.Monad.Error
 import Control.Exception
 import System.PTrace.PTRegs
+import Foreign.C.Error
 
 --TODO load from header
 
@@ -210,7 +211,7 @@ setRegsPT r = ptAlloca $ \p -> do
 
 -- | Advances whatever thread we are in the context of
 advance :: PTrace ()
-advance = void $ ptrace Syscall traceNull nullPtr
+advance = void $ ptrace Syscall (pTracePlusPtr traceNull 1) nullPtr
 
 -- | Matches the next event which occurs on a traced thread
 nextEvent :: IO (PPid, StopReason) -- ^ Why it stopped
@@ -234,6 +235,16 @@ nextEvent = do
          (Exited c) -> return $ ProgExit c
          x -> error $ "Unhandled status: " ++ (show x)
   return (P pid, r)
+
+slowRead _ _ 0 = return ()
+slowRead target source len = do
+  v <- ptrace PeekData source nullPtr
+  e <- liftIO $ getErrno
+  if (v == -1) && (e /= eOK)
+    then return ()
+    else do liftIO $ poke (castPtr target) v
+            slowRead (target `plusPtr` 8) (source `pTracePlusPtr` 8) (len - 8)
+
 -- | Attempts to read up to the specified length from the source into the
 --   destination.
 --   It will still succeed on non-erroring partial reads, and will return
@@ -242,7 +253,25 @@ getDataPT :: Ptr a       -- ^ Destination buffer
           -> PTracePtr a -- ^ Source buffer
           -> Int         -- ^ Max Length
           -> PTrace Int  -- ^ Length Read
-getDataPT target source len = do
+getDataPT _ _ 0 = return 0
+getDataPT  target source len = do
+  -- Force the page in
+  liftIO $ putStrLn $ "Getting data, length " ++ (show len)
+  let src  = unpackPtr source
+  let far  = src + 4096
+  let stop = far - (far `mod` 4096)
+  let len' = min len $ fromIntegral $ stop - src
+  liftIO $ print src
+  liftIO $ print stop
+  liftIO $ print len
+  liftIO $ print len'
+  r <- catchError (getDataPT' target source len') (\_ -> do liftIO $ print "Early read term"
+                                                            slowRead target source len'
+                                                            return len)
+  liftIO $ print r
+  r' <- getDataPT (target `plusPtr` r) (source `pTracePlusPtr` r) (len - r)
+  return $ r + r'
+getDataPT' target source len = do
   mem <- fmap pthMem getHandle
   liftIO $ hSeek mem AbsoluteSeek $ fromIntegral $ unpackPtr source
   v <- liftIO $ fmap Right (hGetBuf mem target len) `catch`
