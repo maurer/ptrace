@@ -217,7 +217,6 @@ advance = void $ ptrace Syscall (pTracePlusPtr traceNull 1) nullPtr
 nextEvent :: IO (PPid, StopReason) -- ^ Why it stopped
 nextEvent = do
   (pid, ev, status) <- getEv
-  putStrLn $ "Event code: " ++ (show ev)
   r <- case status of
          (Stopped x) | x .&. 63 == sigTRAP -> do
            debug "Found a SIGTRAP"
@@ -256,19 +255,13 @@ getDataPT :: Ptr a       -- ^ Destination buffer
 getDataPT _ _ 0 = return 0
 getDataPT  target source len = do
   -- Force the page in
-  liftIO $ putStrLn $ "Getting data, length " ++ (show len)
   let src  = unpackPtr source
   let far  = src + 4096
   let stop = far - (far `mod` 4096)
   let len' = min len $ fromIntegral $ stop - src
-  liftIO $ print src
-  liftIO $ print stop
-  liftIO $ print len
-  liftIO $ print len'
   r <- catchError (getDataPT' target source len') (\_ -> do liftIO $ print "Early read term"
                                                             slowRead target source len'
                                                             return len)
-  liftIO $ print r
   r' <- getDataPT (target `plusPtr` r) (source `pTracePlusPtr` r) (len - r)
   return $ r + r'
 getDataPT' target source len = do
