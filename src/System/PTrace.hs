@@ -55,6 +55,7 @@ import Control.Monad.Error
 import Control.Exception
 import System.PTrace.PTRegs
 import Foreign.C.Error
+import Data.Word
 
 --TODO load from header
 
@@ -214,9 +215,9 @@ advance :: PTrace ()
 advance = void $ ptrace Syscall (pTracePlusPtr traceNull 1) nullPtr
 
 -- | Matches the next event which occurs on a traced thread
-nextEvent :: IO (PPid, StopReason) -- ^ Why it stopped
-nextEvent = do
-  (pid, ev, status) <- getEv
+nextEvent :: PPid -> IO (PPid, StopReason) -- ^ Why it stopped
+nextEvent (P k) = do
+  (pid, ev, status) <- getEv k
   r <- case status of
          (Stopped x) | x .&. 63 == sigTRAP -> do
            debug "Found a SIGTRAP"
@@ -235,14 +236,28 @@ nextEvent = do
          x -> error $ "Unhandled status: " ++ (show x)
   return (P pid, r)
 
-slowRead _ _ 0 = return ()
+slowRead _ _ 0 = return 0
 slowRead target source len = do
   v <- ptrace PeekData source nullPtr
   e <- liftIO $ getErrno
   if (v == -1) && (e /= eOK)
-    then return ()
+    then return 0
     else do liftIO $ poke (castPtr target) v
-            slowRead (target `plusPtr` 8) (source `pTracePlusPtr` 8) (len - 8)
+            r <- slowRead (target `plusPtr` 8) (source `pTracePlusPtr` 8) (len - 8)
+            return (r + 8)
+slowWrite _ _ 0 = return 0
+slowWrite target source len | len < 8 = do
+  z <- liftIO $peek (castPtr source)
+  v <- ptrace PeekData target nullPtr
+  ptrace PokeData target $ wordPtrToPtr $ fromIntegral $ (((v `shiftR` 8) `shiftL` 8) .|. (fromIntegral (z :: Word8)))
+  r <- slowWrite (target `pTracePlusPtr` 1) (source `plusPtr` 1) (len - 1)
+  return (r + 1)
+                            | len >= 8 = do
+  z <- liftIO $ peek (castPtr source)
+  v <- ptrace PokeData target z
+  r <- slowWrite (target `pTracePlusPtr` 8) (source `plusPtr` 8) (len - 8)
+  return (r + 8)
+
 
 -- | Attempts to read up to the specified length from the source into the
 --   destination.
@@ -260,10 +275,11 @@ getDataPT  target source len = do
   let stop = far - (far `mod` 4096)
   let len' = min len $ fromIntegral $ stop - src
   r <- catchError (getDataPT' target source len') (\_ -> do liftIO $ print "Early read term"
-                                                            slowRead target source len'
-                                                            return len)
-  r' <- getDataPT (target `plusPtr` r) (source `pTracePlusPtr` r) (len - r)
-  return $ r + r'
+                                                            slowRead target source len')
+  if (r /= len')
+     then return r
+      else do r' <- getDataPT (target `plusPtr` r) (source `pTracePlusPtr` r) (len - r)
+              return $ r + r'
 getDataPT' target source len = do
   mem <- fmap pthMem getHandle
   liftIO $ hSeek mem AbsoluteSeek $ fromIntegral $ unpackPtr source
@@ -278,9 +294,25 @@ setDataPT :: PTracePtr a -- ^ Destination buffer
           -> Ptr a       -- ^ Source buffer
           -> Int         -- ^ Length
           -> PTrace ()
-setDataPT target source len = do
+setDataPT _ _ 0 = return ()
+setDataPT  target source len = do
+  -- Force the page in
+  let src  = unpackPtr target
+  let far  = src + 4096
+  let stop = far - (far `mod` 4096)
+  let len' = min len $ fromIntegral $ stop - src
+  r <- catchError (setDataPT' target source len') (\_ -> do liftIO $ print "Early write term"
+                                                            slowWrite target source len')
+  if (r /= len')
+     then return () --r
+      else do r' <- setDataPT (target `pTracePlusPtr` r) (source `plusPtr` r) (len - r)
+              return () -- $ r + r'
+
+setDataPT' target source len = do
   mem <- fmap pthMem getHandle
-  liftIO $ hSeek mem AbsoluteSeek $ fromIntegral $ unpackPtr target
-  success <- liftIO $ (do hPutBuf mem source len; return True) `catch`
-                      (\(_ :: IOError) -> return False)
-  unless success $ throwError WriteError
+  v <- liftIO $ (do hSeek mem AbsoluteSeek $ fromIntegral $ unpackPtr target
+                    fmap Right $ hPutBuf mem source len) `catch`
+                         (\(_ :: IOError) -> return $ Left WriteError)
+  case v of
+    Left e -> throwError e
+    Right x -> return len
