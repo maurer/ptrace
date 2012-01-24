@@ -306,7 +306,7 @@ setDataPT  target source len = do
   if (r /= len')
      then return () --r
       else do r' <- setDataPT (target `pTracePlusPtr` r) (source `plusPtr` r) (len - r)
-              return () -- $ r + r'
+              return () --  r + r'
 
 setDataPT' target source len = do
   mem <- fmap pthMem getHandle
