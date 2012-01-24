@@ -62,6 +62,7 @@ import Foreign.C.Error
 import Data.Word
 import qualified Data.Map as Map
 import qualified Data.Traversable as T
+import Foreign.Marshal.Utils
 
 --TODO load from header
 
@@ -311,7 +312,18 @@ slowWrite target source len | len < 8 = do
   r <- slowWrite (target `pTracePlusPtr` 8) (source `plusPtr` 8) (len - 8)
   return (r + 8)
 
-
+translatePtr :: PTracePtr a -> PTrace (Ptr a)
+translatePtr pptr = do
+  --TODO WARNING! THREAD SAFETY! Pointer could become invalid.
+  --TODO to make this faster, switch the core image data structure
+  let wp = unpackPtr pptr
+  pth <- getHandle
+  mem <- liftIO $ readMVar $ pthMemMap pth
+  case filter (<= wp) (Map.keys mem) of
+    [] -> do refreshMemMap
+             translatePtr pptr --TODO deal with infinite loop
+    xs -> return $ castPtr $ fromJust $ mrLocal $ mem Map.! (maximum xs) --TODO deal with unmapped regions
+  
 -- | Attempts to read up to the specified length from the source into the
 --   destination.
 --   It will still succeed on non-erroring partial reads, and will return
@@ -321,26 +333,11 @@ getDataPT :: Ptr a       -- ^ Destination buffer
           -> Int         -- ^ Max Length
           -> PTrace Int  -- ^ Length Read
 getDataPT _ _ 0 = return 0
-getDataPT  target source len = do
-  -- Force the page in
-  let src  = unpackPtr source
-  let far  = src + 4096
-  let stop = far - (far `mod` 4096)
-  let len' = min len $ fromIntegral $ stop - src
-  r <- catchError (getDataPT' target source len') (\_ -> do liftIO $ print "Early read term"
-                                                            slowRead target source len')
-  if (r /= len')
-     then return r
-      else do r' <- getDataPT (target `plusPtr` r) (source `pTracePlusPtr` r) (len - r)
-              return $ r + r'
-getDataPT' target source len = do
-  mem <- fmap pthMem getHandle
-  liftIO $ hSeek mem AbsoluteSeek $ fromIntegral $ unpackPtr source
-  v <- liftIO $ fmap Right (hGetBuf mem target len) `catch`
-                (\(_ :: IOError) -> return $ Left ReadError)
-  case v of
-    Left e  -> throwError e
-    Right x -> return x
+getDataPT target source len = do
+  --TODO add validation and support for region-spanning reads
+  source' <- translatePtr source
+  liftIO $ copyBytes target source' len
+  return len
 
 -- | Attempts to write the specified length into the target from the source.
 setDataPT :: PTracePtr a -- ^ Destination buffer
@@ -349,26 +346,7 @@ setDataPT :: PTracePtr a -- ^ Destination buffer
           -> PTrace ()
 setDataPT _ _ 0 = return ()
 setDataPT  target source len = do
-  -- Force the page in
-  let src  = unpackPtr target
-  let far  = src + 4096
-  let stop = far - (far `mod` 4096)
-  let len' = min len $ fromIntegral $ stop - src
-  r <- catchError (setDataPT' target source len') (\_ -> do liftIO $ print "Early write term"
-                                                            slowWrite target source len')
-  if (r /= len')
-     then return () --r
-      else do r' <- setDataPT (target `pTracePlusPtr` r) (source `plusPtr` r) (len - r)
-              return () --  r + r'
-
-setDataPT' target source len = do
-  mem <- fmap pthMem getHandle
-  v <- liftIO $ (do hSeek mem AbsoluteSeek $ fromIntegral $ unpackPtr target
-                    fmap Right $ hPutBuf mem source len) `catch`
-                         (\(_ :: IOError) -> return $ Left WriteError)
-  case v of
-    Left e -> throwError e
-    Right x -> return len
-
---TODO arch indep
-data PTImage = Map Word64 (Ptr Word8)
+  --TODO add validation and support for region-spanning writes
+  target' <- translatePtr target
+  liftIO $ copyBytes target' source len
+  return ()
