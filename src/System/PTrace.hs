@@ -38,9 +38,13 @@ PTraceHandle
 ) where
 
 import Prelude hiding (catch)
+import Bindings.MMap
+import Data.Maybe
+import Control.Concurrent.MVar
 import Control.Monad.Reader
 import System.Posix.Process
 import System.Posix.Types
+import System.Posix.IO
 import System.PTrace.Raw
 import System.PTrace.Types
 import System.Posix.Signals
@@ -56,6 +60,8 @@ import Control.Exception
 import System.PTrace.PTRegs
 import Foreign.C.Error
 import Data.Word
+import qualified Data.Map as Map
+import qualified Data.Traversable as T
 
 --TODO load from header
 
@@ -148,17 +154,64 @@ forkPT m = do
     Just (Stopped _) -> makeHandle pid
     _                -> error "Failed to get a stopped process."
 
+buildMap :: [MemRegion] -> Map.Map WordPtr MemRegion
+buildMap ms = Map.fromList $ map (\x -> (mrStart x, x)) ms
+
+loadMap :: FilePath -> IO (Map.Map WordPtr MemRegion)
+loadMap mapDescr = do
+  mapSpec <- fmap ((filter (/= "")) . lines) $ readFile mapDescr
+  return $ buildMap $ map parseRegion mapSpec 
+  where parseRegion l = let (hexA,  hexB) = break (== '-') $ head $ words l
+                            [start, end] = map (\x -> fromIntegral $ read ("0x" ++ x)) [hexA, tail hexB]
+                        in MR {mrStart = start, mrEnd = end, mrLocal = Nothing}
+
+updateMemMap :: Map.Map WordPtr MemRegion -> FilePath -> Fd -> IO (Map.Map WordPtr MemRegion)
+updateMemMap origMap maps mem = do
+  -- Load new mapping
+  newMapDesc <- loadMap maps
+  -- Purge pass: Unmap and remove all entries not present in the current mapping
+  let (purgedMap, toPurge) = Map.partition (present newMapDesc) origMap
+  mapM_ purge $ Map.elems toPurge
+  -- Load pass: Map and add all entries present in the current mapping, but not our core
+  newMaps <- T.traverse (mapRegion mem) $ Map.filter (not . (present purgedMap)) newMapDesc
+  return $ Map.union purgedMap newMaps
+  where present :: Map.Map WordPtr MemRegion -> MemRegion -> Bool
+        present base target = case Map.lookup (mrStart target) base of
+                                Just v  -> (mrEnd v) == (mrEnd target)
+                                Nothing -> False
+        purge :: MemRegion -> IO ()
+        purge mr = throwErrnoIfMinus1_ "purge failed" $ c'munmap (fromJust $ mrLocal mr) (mrSize mr)
+        mapRegion :: Fd -> MemRegion -> IO MemRegion
+        mapRegion (Fd fd) mr = do
+          --TODO catch error
+          p <- c'mmap nullPtr (mrSize mr) (c'PROT_READ .|. c'PROT_WRITE) c'MAP_SHARED fd (fromIntegral $ mrStart mr)
+          return $ mr {mrLocal = Just p}
+        mrSize mr = ((fromIntegral $ mrEnd mr) - (fromIntegral $ mrStart mr))
+
 makeHandle :: CPid -> IO PTraceHandle
 makeHandle pid = do
-  mem <- openBinaryFile ("/proc" </> show pid </> "mem") ReadWriteMode
+  let procDir = "/proc" </> show pid
+  let memPath = procDir </> "mem"
+  mem   <- openBinaryFile memPath ReadWriteMode
+  memFd <- openFd memPath ReadWrite Nothing defaultFileFlags
+  let maps = procDir </> "maps"
+  memMap <- updateMemMap Map.empty maps memFd
+  mMemMap <- newMVar memMap
   hSetBuffering mem NoBuffering
   setOptions pid
-  return PTH {pthPID = pid, pthMem = mem}
+  return PTH {pthPID = pid, pthMem = mem, pthMaps = maps, pthMemFd = memFd, pthMemMap = mMemMap}
   where setOptions :: CPid -> IO ()
         setOptions pid = void $ ptraceRaw (toCReq SetOptions)
                                           pid
                                           0
                                           (traceSysGood .|. traceFork .|. traceClone)
+
+refreshMemMap :: PTrace ()
+refreshMemMap = do
+  pth <- getHandle
+  memMap <- liftIO $ takeMVar $ pthMemMap pth
+  memMap' <- liftIO $ updateMemMap memMap (pthMaps pth) (pthMemFd pth)
+  liftIO $ putMVar (pthMemMap pth) memMap'
 
 -- | Takes in a description of a program to execute, then starts it
 --   in a tracing context, and gives you back the handle
@@ -316,3 +369,6 @@ setDataPT' target source len = do
   case v of
     Left e -> throwError e
     Right x -> return len
+
+--TODO arch indep
+data PTImage = Map Word64 (Ptr Word8)

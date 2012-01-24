@@ -10,6 +10,8 @@ import System.Posix.Types
 import System.IO
 import Data.IORef
 import System.PTrace.PTRegs
+import Data.Map
+import Control.Concurrent.MVar
 
 -- | Simple wrapper newtype around a pointer to make it a tracing
 --   pointer. Note that the storable instance will only work if the
@@ -36,6 +38,10 @@ traceNull = PTP nullPtr
 unpackPtr :: PTracePtr a -> WordPtr
 unpackPtr (PTP ptr) = ptrToWordPtr ptr
 
+data MemRegion = MR { mrStart  :: WordPtr
+                     ,mrEnd    :: WordPtr
+                     ,mrLocal  :: Maybe (Ptr ()) }
+
 -- | Abstract type representing a handle to a trace in progress
 --   Using 'detachPT' or 'killPT' invalidates the 'PTraceHandle', similar
 --   to what happens if you 'close' a 'Handle'. It is also invalidated
@@ -44,8 +50,11 @@ unpackPtr (PTP ptr) = ptrToWordPtr ptr
 --   thread, you cannot. The system pins the permissions to an individual
 --   thread, so migrating the handle will not allow another thread to
 --   trace properly.
-data PTraceHandle = PTH { pthPID :: ProcessID
-                         ,pthMem :: Handle}
+data PTraceHandle = PTH { pthPID   :: ProcessID
+                         ,pthMem   :: Handle
+                         ,pthMemFd :: Fd
+                         ,pthMaps :: FilePath
+                         ,pthMemMap :: MVar (Map WordPtr MemRegion)}
 
 data SysState = Entry | Exit deriving Show
 

@@ -16,7 +16,7 @@ Library
   Other-Modules:     System.PTrace.Types, System.PTrace.Raw,
                      System.PTrace.PTRegs
   Build-depends:     base, mtl, unix, filepath, c-storable-deriving,
-                     ghc-prim
+                     ghc-prim, containers, bindings-mmap
   Extensions:        GeneralizedNewtypeDeriving,
                      ForeignFunctionInterface,
                      DeriveGeneric,
