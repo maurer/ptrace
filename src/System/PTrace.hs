@@ -63,6 +63,7 @@ import Data.Word
 import qualified Data.Map as Map
 import qualified Data.Traversable as T
 import Foreign.Marshal.Utils
+import Control.Applicative
 
 --TODO load from header
 
@@ -87,6 +88,8 @@ debug _ = return () --liftIO . putStrLn
 --   be added later.
 data PTError = ReadError           -- ^ Remote read failed
              | WriteError          -- ^ Remote write failed
+             | NoTranslation       -- ^ Pointer does not exist in memmap
+             | NoMapping
              | UnknownError String -- ^ Other error
                deriving Show
 
@@ -114,7 +117,7 @@ getPPid pth = P $ pthPID pth
 --   should not be too terrifying).
 newtype PTrace a = PT {
   ptraceInner :: ErrorT PTError (ReaderT PTraceHandle IO) a
-  } deriving (Functor, Monad, MonadIO)
+  } deriving (Functor, Monad, MonadIO, Applicative)
 
 instance MonadError PTError PTrace where
   throwError e = PT $ throwError e
@@ -163,16 +166,17 @@ loadMap mapDescr = do
   mapSpec <- fmap ((filter (/= "")) . lines) $ readFile mapDescr
   return $ buildMap $ map parseRegion mapSpec 
   where parseRegion l = let (hexA,  hexB) = break (== '-') $ head $ words l
+                            (_:(_:_:x:_):_) = words l
                             [start, end] = map (\x -> fromIntegral $ read ("0x" ++ x)) [hexA, tail hexB]
-                        in MR {mrStart = start, mrEnd = end, mrLocal = Nothing}
+                        in MR {mrStart = start, mrEnd = end, mrLocal = Nothing, mrExec = x == 'x'}
 
-updateMemMap :: Map.Map WordPtr MemRegion -> FilePath -> Fd -> IO (Map.Map WordPtr MemRegion)
+updateMemMap :: Map.Map WordPtr MemRegion -> FilePath -> Fd -> PTrace (Map.Map WordPtr MemRegion)
 updateMemMap origMap maps mem = do
   -- Load new mapping
-  newMapDesc <- loadMap maps
+  newMapDesc <- liftIO $ loadMap maps
   -- Purge pass: Unmap and remove all entries not present in the current mapping
   let (purgedMap, toPurge) = Map.partition (present newMapDesc) origMap
-  mapM_ purge $ Map.elems toPurge
+  liftIO $ mapM_ purge $ Map.elems toPurge
   -- Load pass: Map and add all entries present in the current mapping, but not our core
   newMaps <- T.traverse (mapRegion mem) $ Map.filter (not . (present purgedMap)) newMapDesc
   return $ Map.union purgedMap newMaps
@@ -181,14 +185,24 @@ updateMemMap origMap maps mem = do
                                 Just v  -> (mrEnd v) == (mrEnd target)
                                 Nothing -> False
         purge :: MemRegion -> IO ()
-        purge mr = throwErrnoIfMinus1_ "purge failed" $ c'munmap (fromJust $ mrLocal mr) (mrSize mr)
-        mapRegion :: Fd -> MemRegion -> IO MemRegion
-        mapRegion (Fd fd) mr = do
-          --TODO catch error
-          p <- c'mmap nullPtr (mrSize mr) (c'PROT_READ .|. c'PROT_WRITE) c'MAP_SHARED fd (fromIntegral $ mrStart mr)
-          return $ mr {mrLocal = Just p}
+        purge mr = case mrLocal mr of
+                     Just local -> throwErrnoIfMinus1_ "purge failed" $ c'munmap local (mrSize mr)
+                     Nothing    -> return ()
+        mapRegion :: Fd -> MemRegion -> PTrace MemRegion
+        mapRegion (Fd fd) mr | (not (mrExec mr)) = do
+          --Kick the target upside the head, make sure it's there when we go to grab it
+          prepareMap (mrSize mr) (fromIntegral $ mrStart mr)
+          --Actually invoke the mapper
+          p <- liftIO $ c'mmap nullPtr (mrSize mr) (c'PROT_READ .|. c'PROT_WRITE) c'MAP_PRIVATE fd (fromIntegral $ mrStart mr)
+          if p == (intPtrToPtr $ fromIntegral (-1)) --Map failed
+            then return $ mr {mrLocal = Nothing}  --Indicate that this region is not in happyland
+            else return $ mr {mrLocal = Just p}
+                             | otherwise = return $ mr {mrLocal = Nothing} --Don't touch exec
         mrSize mr = ((fromIntegral $ mrEnd mr) - (fromIntegral $ mrStart mr))
-
+        prepareMap size ptr | size <= 0 = return ()
+                            | otherwise = do ptrace PeekData (PTP $ wordPtrToPtr $ fromIntegral ptr) nullPtr
+                                             prepareMap (size - 4096) (ptr + 4096) --TODO demagic page size
+                                             
 makeHandle :: CPid -> IO PTraceHandle
 makeHandle pid = do
   let procDir = "/proc" </> show pid
@@ -196,7 +210,7 @@ makeHandle pid = do
   mem   <- openBinaryFile memPath ReadWriteMode
   memFd <- openFd memPath ReadWrite Nothing defaultFileFlags
   let maps = procDir </> "maps"
-  memMap <- updateMemMap Map.empty maps memFd
+  Right memMap <- runPTrace (PTH {pthPID = pid}) $ updateMemMap Map.empty maps memFd
   mMemMap <- newMVar memMap
   hSetBuffering mem NoBuffering
   setOptions pid
@@ -211,7 +225,7 @@ refreshMemMap :: PTrace ()
 refreshMemMap = do
   pth <- getHandle
   memMap <- liftIO $ takeMVar $ pthMemMap pth
-  memMap' <- liftIO $ updateMemMap memMap (pthMaps pth) (pthMemFd pth)
+  memMap' <- updateMemMap memMap (pthMaps pth) (pthMemFd pth)
   liftIO $ putMVar (pthMemMap pth) memMap'
 
 -- | Takes in a description of a program to execute, then starts it
@@ -299,31 +313,43 @@ slowRead target source len = do
     else do liftIO $ poke (castPtr target) v
             r <- slowRead (target `plusPtr` 8) (source `pTracePlusPtr` 8) (len - 8)
             return (r + 8)
-slowWrite _ _ 0 = return 0
+slowWrite _ _ 0 = return () -- 0
 slowWrite target source len | len < 8 = do
   z <- liftIO $peek (castPtr source)
   v <- ptrace PeekData target nullPtr
   ptrace PokeData target $ wordPtrToPtr $ fromIntegral $ (((v `shiftR` 8) `shiftL` 8) .|. (fromIntegral (z :: Word8)))
   r <- slowWrite (target `pTracePlusPtr` 1) (source `plusPtr` 1) (len - 1)
-  return (r + 1)
+  return () -- (r + 1)
                             | len >= 8 = do
   z <- liftIO $ peek (castPtr source)
   v <- ptrace PokeData target z
   r <- slowWrite (target `pTracePlusPtr` 8) (source `plusPtr` 8) (len - 8)
-  return (r + 8)
+  return () --(r + 8)
 
 translatePtr :: PTracePtr a -> PTrace (Ptr a)
-translatePtr pptr = do
-  --TODO WARNING! THREAD SAFETY! Pointer could become invalid.
+translatePtr pptr = (translatePtr' pptr) `catchError` (\e -> case e of NoMapping -> throwError e; NoTranslation -> do refreshMemMap; translatePtr' pptr)
+--TODO WARNING! THREAD SAFETY! Pointer could become invalid.
   --TODO to make this faster, switch the core image data structure
-  let wp = unpackPtr pptr
-  pth <- getHandle
-  mem <- liftIO $ readMVar $ pthMemMap pth
-  case filter (<= wp) (Map.keys mem) of
-    [] -> do refreshMemMap
-             translatePtr pptr --TODO deal with infinite loop
-    xs -> return $ castPtr $ fromJust $ mrLocal $ mem Map.! (maximum xs) --TODO deal with unmapped regions
-  
+  where translatePtr' ptr = do
+          let wp = unpackPtr pptr
+          mMemMap <- fmap pthMemMap getHandle
+          memMap  <- liftIO $ readMVar mMemMap
+          case filter (<= wp) (Map.keys memMap) of
+            [] -> throwError NoTranslation
+            xs -> do let candidate = memMap Map.! (maximum xs)
+                     if (mrEnd candidate) < wp
+                        then throwError NoTranslation
+                        else case mrLocal candidate of
+                               Nothing -> throwError NoMapping
+                               Just x  -> return $ castPtr x
+
+multipath :: MonadError e m => e -> [m a] -> m a
+multipath e [] = throwError e
+multipath e (x : xs) = catchError x (\_ -> multipath e xs)
+
+(<#>) :: [a -> b] -> a -> [b]
+fs <#> x = map (\f -> f x) fs
+
 -- | Attempts to read up to the specified length from the source into the
 --   destination.
 --   It will still succeed on non-erroring partial reads, and will return
@@ -335,9 +361,30 @@ getDataPT :: Ptr a       -- ^ Destination buffer
 getDataPT _ _ 0 = return 0
 getDataPT target source len = do
   --TODO add validation and support for region-spanning reads
+  multipath ReadError $ [getMappedPT, getFilePT, slowRead] <#> target <#> source <#> len
+
+getMappedPT :: Ptr a       -- ^ Destination buffer
+            -> PTracePtr a -- ^ Source buffer
+            -> Int         -- ^ Max Length
+            -> PTrace Int  -- ^ Length Read
+getMappedPT target source len = do
   source' <- translatePtr source
   liftIO $ copyBytes target source' len
   return len
+
+getFilePT :: Ptr a       -- ^ Destination buffer
+          -> PTracePtr a -- ^ Source buffer
+          -> Int         -- ^ Max Length
+          -> PTrace Int  -- ^ Length Read
+getFilePT target source len = do
+  mem <- fmap pthMem getHandle
+  liftIO $ hSeek mem AbsoluteSeek $ fromIntegral $ unpackPtr source
+  v <- liftIO $ fmap Right (hGetBuf mem target len) `catch`
+                (\(_ :: IOError) -> return $ Left ReadError)
+  case v of
+    Left e  -> do liftIO $ putStrLn "Warning! getFilePT failed..."
+                  throwError e
+    Right x -> return x
 
 -- | Attempts to write the specified length into the target from the source.
 setDataPT :: PTracePtr a -- ^ Destination buffer
@@ -346,6 +393,15 @@ setDataPT :: PTracePtr a -- ^ Destination buffer
           -> PTrace ()
 setDataPT _ _ 0 = return ()
 setDataPT  target source len = do
+  liftIO $ putStrLn "setData invoked"
+  multipath WriteError $ [setMappedPT, slowWrite] <#> target <#> source <#> len
+
+setMappedPT :: PTracePtr a -- ^ Destination buffer
+            -> Ptr a       -- ^ Source buffer
+            -> Int         -- ^ Max Length
+            -> PTrace ()
+setMappedPT target source len = do
+  liftIO $ putStrLn "setData invoked"
   --TODO add validation and support for region-spanning writes
   target' <- translatePtr target
   liftIO $ copyBytes target' source len

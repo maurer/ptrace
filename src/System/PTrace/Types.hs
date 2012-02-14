@@ -40,6 +40,7 @@ unpackPtr (PTP ptr) = ptrToWordPtr ptr
 
 data MemRegion = MR { mrStart  :: WordPtr
                      ,mrEnd    :: WordPtr
+                     ,mrExec   :: Bool
                      ,mrLocal  :: Maybe (Ptr ()) }
 
 -- | Abstract type representing a handle to a trace in progress
