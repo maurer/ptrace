@@ -26,6 +26,8 @@ PTraceHandle
 -- * Remote Pointers
 ,PTracePtr(..)
 ,pTracePlusPtr
+,getMemMap
+,MemRegion(..)
 -- * Interacting with the target
 ,PTRegs(..)
 ,getRegsPT
@@ -97,6 +99,11 @@ instance Error PTError where
   strMsg = UnknownError
 
 getPPid pth = P $ pthPID pth
+
+getMemMap :: PTrace (Map.Map WordPtr MemRegion)
+getMemMap = do
+  pth <- getHandle
+  fmap (Map.map (\m -> m {mrLocal = Nothing})) $ liftIO $ readMVar $ pthMemMap pth
 
 {-
   We create the PTrace monad. Technically, this could be almost as powerful
