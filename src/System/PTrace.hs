@@ -200,7 +200,7 @@ updateMemMap origMap maps mem = do
           --Kick the target upside the head, make sure it's there when we go to grab it
           prepareMap (mrSize mr) (fromIntegral $ mrStart mr)
           --Actually invoke the mapper
-          p <- liftIO $ c'mmap nullPtr (mrSize mr) (c'PROT_READ .|. c'PROT_WRITE) c'MAP_PRIVATE fd (fromIntegral $ mrStart mr)
+          p <- return (intPtrToPtr $ fromIntegral (-1)) --liftIO $ c'mmap nullPtr (mrSize mr) (c'PROT_READ .|. c'PROT_WRITE) c'MAP_PRIVATE fd (fromIntegral $ mrStart mr)
           if p == (intPtrToPtr $ fromIntegral (-1)) --Map failed
             then return $ mr {mrLocal = Nothing}  --Indicate that this region is not in happyland
             else return $ mr {mrLocal = Just p}
