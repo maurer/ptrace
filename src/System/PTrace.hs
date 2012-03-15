@@ -311,8 +311,8 @@ nextEvent (P k) = do
          x -> error $ "Unhandled status: " ++ (show x)
   return (P pid, r)
 
-slowRead _ _ 0 = return 0
-slowRead target source len = do
+slowRead target source len | len <= 0  = return 0
+                           | otherwise = do
   v <- ptrace PeekData source nullPtr
   e <- liftIO $ getErrno
   if (v == -1) && (e /= eOK)
