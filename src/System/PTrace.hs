@@ -368,7 +368,7 @@ getDataPT :: Ptr a       -- ^ Destination buffer
 getDataPT _ _ 0 = return 0
 getDataPT target source len = do
   --TODO add validation and support for region-spanning reads
-  multipath ReadError $ [getFilePT, slowRead] <#> target <#> source <#> len
+  multipath ReadError $ [getFilePT] <#> target <#> source <#> len
 
 getMappedPT :: Ptr a       -- ^ Destination buffer
             -> PTracePtr a -- ^ Source buffer
@@ -401,7 +401,7 @@ setDataPT :: PTracePtr a -- ^ Destination buffer
 setDataPT _ _ 0 = return ()
 setDataPT  target source len = do
   liftIO $ putStrLn "setData invoked"
-  multipath WriteError $ [setFilePT, slowWrite] <#> target <#> source <#> len
+  multipath WriteError $ [setFilePT] <#> target <#> source <#> len
 
 setMappedPT :: PTracePtr a -- ^ Destination buffer
             -> Ptr a       -- ^ Source buffer
