@@ -368,7 +368,7 @@ getDataPT :: Ptr a       -- ^ Destination buffer
 getDataPT _ _ 0 = return 0
 getDataPT target source len = do
   --TODO add validation and support for region-spanning reads
-  multipath ReadError $ [getMappedPT, getFilePT, slowRead] <#> target <#> source <#> len
+  multipath ReadError $ [getFilePT, slowRead] <#> target <#> source <#> len
 
 getMappedPT :: Ptr a       -- ^ Destination buffer
             -> PTracePtr a -- ^ Source buffer
@@ -401,7 +401,7 @@ setDataPT :: PTracePtr a -- ^ Destination buffer
 setDataPT _ _ 0 = return ()
 setDataPT  target source len = do
   liftIO $ putStrLn "setData invoked"
-  multipath WriteError $ [setMappedPT, slowWrite] <#> target <#> source <#> len
+  multipath WriteError $ [setFilePT, slowWrite] <#> target <#> source <#> len
 
 setMappedPT :: PTracePtr a -- ^ Destination buffer
             -> Ptr a       -- ^ Source buffer
@@ -413,3 +413,18 @@ setMappedPT target source len = do
   target' <- translatePtr target
   liftIO $ copyBytes target' source len
   return ()
+
+setFilePT :: PTracePtr a -- ^ Destination buffer
+          -> Ptr a       -- ^ Source buffer
+          -> Int         -- ^ Max Length
+          -> PTrace ()
+setFilePT target source len = do
+  mem <- fmap pthMem getHandle
+  liftIO $ hSeek mem AbsoluteSeek $ fromIntegral $ unpackPtr target
+  v <- liftIO $ fmap Right (hPutBuf mem source len) `catch`
+                (\(_ :: IOError) -> return $ Left WriteError)
+  case v of
+    Left e  -> do liftIO $ putStrLn "Warning! setFilePT failed..."
+                  throwError e
+    Right x -> return x
+
