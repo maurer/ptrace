@@ -244,9 +244,11 @@ execPT :: FilePath                 -- ^ File to run
        -> IO PTraceHandle          -- ^ A handle to the paused executable
 execPT f s a e = forkPT (executeFile f s a e)
 
+{-
 attachPT :: ProcessID
          -> IO PTraceHandle
 attachPT = undefined
+-}
 
 -- | Releases the handle being traced, allowing the process to do as it
 --   wishes.
