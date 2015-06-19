@@ -35,8 +35,8 @@ pTraceMinusPtr (PTP fp) (PTP fp2) = minusPtr fp fp2
 traceNull :: PTracePtr a
 traceNull = PTP nullPtr
 
-unpackPtr :: PTracePtr a -> WordPtr
-unpackPtr (PTP ptr) = ptrToWordPtr ptr
+unpackPtr :: PTracePtr a -> Ptr a
+unpackPtr (PTP ptr) = ptr
 
 data MemRegion = MR { mrStart  :: WordPtr
                      ,mrEnd    :: WordPtr

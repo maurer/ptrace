@@ -40,7 +40,7 @@ PTraceHandle
 ) where
 
 import Prelude hiding (catch)
-import Bindings.MMap
+import Bindings.Posix.Sys.Mman
 import Data.Maybe
 import Control.Concurrent.MVar
 import Control.Monad.Reader
@@ -57,7 +57,7 @@ import Foreign.Storable
 import Foreign.Marshal.Alloc
 import Data.IORef
 import Data.Bits
-import Control.Monad.Error
+import Control.Monad.Except
 import Control.Exception
 import System.PTrace.PTRegs
 import Foreign.C.Error
@@ -95,9 +95,6 @@ data PTError = ReadError           -- ^ Remote read failed
              | UnknownError String -- ^ Other error
                deriving Show
 
-instance Error PTError where
-  strMsg = UnknownError
-
 getPPid pth = P $ pthPID pth
 
 getMemMap :: PTrace (Map.Map WordPtr MemRegion)
@@ -123,7 +120,7 @@ getMemMap = do
 --   to access IO from inside it (ptracing is inherently unsafe, so this
 --   should not be too terrifying).
 newtype PTrace a = PT {
-  ptraceInner :: ErrorT PTError (ReaderT PTraceHandle IO) a
+  ptraceInner :: ExceptT PTError (ReaderT PTraceHandle IO) a
   } deriving (Functor, Monad, MonadIO, Applicative)
 
 instance MonadError PTError PTrace where
@@ -141,18 +138,18 @@ errNeg msg m = do
 ptrace :: Request -> PTracePtr a -> Ptr b -> PTrace Int
 ptrace req pA pB = do
   pth <- getHandle
-  liftIO $ ptrace_pid (pthPID pth) req pA pB
+  liftIO $ ptracePid (pthPID pth) req pA pB
 
-ptrace_pid pid req pA pB =
-  fmap fromIntegral $ ptraceRaw (toCReq req)
-                                pid
-                                (unpackPtr pA)
-                                (ptrToWordPtr pB)
+ptracePid pid req pA pB =
+  fromIntegral <$> ptraceRaw (toCReq req)
+                             pid
+                             (unpackPtr pA)
+                             pB
 
 -- | Given a 'PTraceHandle' (as created by 'forkPT' or 'execPT'),
 --   allows you to perform a PTrace action on it.
 runPTrace :: PTraceHandle -> PTrace a -> IO (Either PTError a)
-runPTrace h m = runReaderT (runErrorT (ptraceInner m)) h
+runPTrace h m = runReaderT (runExceptT (ptraceInner m)) h
 
 -- | Given an IO action, spawns it in a new thread, stops it, and gives
 --   you back a handle to trace it with.
@@ -170,7 +167,7 @@ buildMap ms = Map.fromList $ map (\x -> (mrStart x, x)) ms
 
 loadMap :: FilePath -> IO (Map.Map WordPtr MemRegion)
 loadMap mapDescr = do
-  mapSpec <- fmap ((filter (/= "")) . lines) $ readFile mapDescr
+  mapSpec <- (filter (/= "") . lines) <$> readFile mapDescr
   return $ buildMap $ map parseRegion mapSpec 
   where parseRegion l = let (hexA,  hexB) = break (== '-') $ head $ words l
                             (_:(_:_:x:_):_) = words l
@@ -185,27 +182,28 @@ updateMemMap origMap maps mem = do
   let (purgedMap, toPurge) = Map.partition (present newMapDesc) origMap
   liftIO $ mapM_ purge $ Map.elems toPurge
   -- Load pass: Map and add all entries present in the current mapping, but not our core
-  newMaps <- T.traverse (mapRegion mem) $ Map.filter (not . (present purgedMap)) newMapDesc
+  newMaps <- T.traverse (mapRegion mem) $ Map.filter (not . present purgedMap) newMapDesc
   return $ Map.union purgedMap newMaps
   where present :: Map.Map WordPtr MemRegion -> MemRegion -> Bool
         present base target = case Map.lookup (mrStart target) base of
-                                Just v  -> (mrEnd v) == (mrEnd target)
+                                Just v  -> mrEnd v == mrEnd target
                                 Nothing -> False
         purge :: MemRegion -> IO ()
         purge mr = case mrLocal mr of
                      Just local -> throwErrnoIfMinus1_ "purge failed" $ c'munmap local (mrSize mr)
                      Nothing    -> return ()
         mapRegion :: Fd -> MemRegion -> PTrace MemRegion
-        mapRegion (Fd fd) mr | (not (mrExec mr)) = do
+        mapRegion (Fd fd) mr | not $ mrExec mr = do
           --Kick the target upside the head, make sure it's there when we go to grab it
           prepareMap (mrSize mr) (fromIntegral $ mrStart mr)
           --Actually invoke the mapper
-          p <- return (intPtrToPtr $ fromIntegral (-1)) --liftIO $ c'mmap nullPtr (mrSize mr) (c'PROT_READ .|. c'PROT_WRITE) c'MAP_PRIVATE fd (fromIntegral $ mrStart mr)
-          if p == (intPtrToPtr $ fromIntegral (-1)) --Map failed
+          --Pretend that the map always failed since the kernel patch isn't common
+          let p = intPtrToPtr $ fromIntegral (-1) --liftIO $ c'mmap nullPtr (mrSize mr) (c'PROT_READ .|. c'PROT_WRITE) c'MAP_PRIVATE fd (fromIntegral $ mrStart mr)
+          if p == intPtrToPtr (fromIntegral (-1)) --Map failed
             then return $ mr {mrLocal = Nothing}  --Indicate that this region is not in happyland
             else return $ mr {mrLocal = Just p}
                              | otherwise = return $ mr {mrLocal = Nothing} --Don't touch exec
-        mrSize mr = ((fromIntegral $ mrEnd mr) - (fromIntegral $ mrStart mr))
+        mrSize mr = fromIntegral (mrEnd mr) - fromIntegral (mrStart mr)
         prepareMap size ptr | size <= 0 = return ()
                             | otherwise = do ptrace PeekData (PTP $ wordPtrToPtr $ fromIntegral ptr) nullPtr
                                              prepareMap (size - 4096) (ptr + 4096) --TODO demagic page size
@@ -217,7 +215,13 @@ makeHandle pid = do
   mem   <- openBinaryFile memPath ReadWriteMode
   memFd <- openFd memPath ReadWrite Nothing defaultFileFlags
   let maps = procDir </> "maps"
-  Right memMap <- runPTrace (PTH {pthPID = pid}) $ updateMemMap Map.empty maps memFd
+  Right memMap <- runPTrace PTH {
+      pthPID  = pid,
+      pthMem  = undefined,
+      pthMaps = undefined,
+      pthMemFd = undefined,
+      pthMemMap = undefined
+    } $ updateMemMap Map.empty maps memFd
   mMemMap <- newMVar memMap
   hSetBuffering mem NoBuffering
   setOptions pid
@@ -225,8 +229,8 @@ makeHandle pid = do
   where setOptions :: CPid -> IO ()
         setOptions pid = void $ ptraceRaw (toCReq SetOptions)
                                           pid
-                                          0
-                                          (traceSysGood .|. traceFork .|. traceClone)
+                                          nullPtr
+                                          $ wordPtrToPtr (traceSysGood .|. traceFork .|. traceClone)
 
 refreshMemMap :: PTrace ()
 refreshMemMap = do
@@ -303,20 +307,20 @@ nextEvent (P k) = do
                | ((ev .&. ptraceEventFork) == ptraceEventFork)
                  || ((ev .&. ptraceEventClone) == ptraceEventClone) -> do
                      pid' <- alloca $ \pp -> do
-                               ptrace_pid pid GetEventMsg traceNull pp
+                               ptracePid pid GetEventMsg traceNull pp
                                liftIO $ peek pp
                      h <- makeHandle pid'
                      return $ Forked h
                | otherwise -> return $ Sig x
            | otherwise -> return $ Sig x
          (Exited c) -> return $ ProgExit c
-         x -> error $ "Unhandled status: " ++ (show x)
+         x -> error $ "Unhandled status: " ++ show x
   return (P pid, r)
 
 slowRead target source len | len <= 0  = return 0
                            | otherwise = do
   v <- ptrace PeekData source nullPtr
-  e <- liftIO $ getErrno
+  e <- liftIO getErrno
   if (v == -1) && (e /= eOK)
     then return 0
     else do liftIO $ poke (castPtr target) v
@@ -326,7 +330,7 @@ slowWrite _ _ 0 = return () -- 0
 slowWrite target source len | len < 8 = do
   z <- liftIO $peek (castPtr source)
   v <- ptrace PeekData target nullPtr
-  ptrace PokeData target $ wordPtrToPtr $ fromIntegral $ (((v `shiftR` 8) `shiftL` 8) .|. (fromIntegral (z :: Word8)))
+  ptrace PokeData target $ wordPtrToPtr $ fromIntegral ((v `shiftR` 8) `shiftL` 8) .|. fromIntegral (z :: Word8)
   r <- slowWrite (target `pTracePlusPtr` 1) (source `plusPtr` 1) (len - 1)
   return () -- (r + 1)
                             | len >= 8 = do
@@ -336,17 +340,17 @@ slowWrite target source len | len < 8 = do
   return () --(r + 8)
 
 translatePtr :: PTracePtr a -> PTrace (Ptr a)
-translatePtr pptr = (translatePtr' pptr) `catchError` (\e -> case e of NoMapping -> throwError e; NoTranslation -> do refreshMemMap; translatePtr' pptr)
+translatePtr pptr = translatePtr' pptr `catchError` (\e -> case e of NoMapping -> throwError e; NoTranslation -> do refreshMemMap; translatePtr' pptr)
 --TODO WARNING! THREAD SAFETY! Pointer could become invalid.
   --TODO to make this faster, switch the core image data structure
   where translatePtr' ptr = do
-          let wp = unpackPtr pptr
+          let wp :: WordPtr = ptrToWordPtr $ unpackPtr pptr
           mMemMap <- fmap pthMemMap getHandle
           memMap  <- liftIO $ readMVar mMemMap
           case filter (<= wp) (Map.keys memMap) of
             [] -> throwError NoTranslation
-            xs -> do let candidate = memMap Map.! (maximum xs)
-                     if (mrEnd candidate) < wp
+            xs -> do let candidate = memMap Map.! maximum xs
+                     if mrEnd candidate < wp
                         then throwError NoTranslation
                         else case mrLocal candidate of
                                Nothing -> throwError NoMapping
@@ -368,7 +372,7 @@ getDataPT :: Ptr a       -- ^ Destination buffer
           -> Int         -- ^ Max Length
           -> PTrace Int  -- ^ Length Read
 getDataPT _ _ 0 = return 0
-getDataPT target source len = do
+getDataPT target source len =
   --TODO add validation and support for region-spanning reads
   multipath ReadError $ [getFilePT] <#> target <#> source <#> len
 
@@ -387,7 +391,7 @@ getFilePT :: Ptr a       -- ^ Destination buffer
           -> PTrace Int  -- ^ Length Read
 getFilePT target source len = do
   mem <- fmap pthMem getHandle
-  liftIO $ hSeek mem AbsoluteSeek $ fromIntegral $ unpackPtr source
+  liftIO $ hSeek mem AbsoluteSeek $ fromIntegral $ ptrToWordPtr $ unpackPtr source
   v <- liftIO $ fmap Right (hGetBuf mem target len) `catch`
                 (\(_ :: IOError) -> return $ Left ReadError)
   case v of
@@ -422,7 +426,7 @@ setFilePT :: PTracePtr a -- ^ Destination buffer
           -> PTrace ()
 setFilePT target source len = do
   mem <- fmap pthMem getHandle
-  liftIO $ hSeek mem AbsoluteSeek $ fromIntegral $ unpackPtr target
+  liftIO $ hSeek mem AbsoluteSeek $ fromIntegral $ ptrToWordPtr $ unpackPtr target
   v <- liftIO $ fmap Right (hPutBuf mem source len) `catch`
                 (\(_ :: IOError) -> return $ Left WriteError)
   case v of

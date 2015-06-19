@@ -13,12 +13,12 @@ import System.Posix.Process.Internals
 
 foreign import ccall unsafe "ptrace" ptraceRaw :: CInt
                                                -> CPid
-                                               -> WordPtr
-                                               -> WordPtr
+                                               -> Ptr a
+                                               -> Ptr b
                                                -> IO CLong
 
 traceMe :: IO ()
-traceMe = void $ ptraceRaw 0 0 0 0
+traceMe = void $ ptraceRaw 0 0 nullPtr nullPtr
 
 foreign import ccall unsafe "wait4" waitpidRaw :: CPid
                                               -> Ptr CInt
